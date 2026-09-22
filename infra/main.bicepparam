@@ -1,0 +1,11 @@
+using './main.bicep'
+
+param resourceGroupName = 'ppl-storagereplication-demo'
+param primaryDnsResourceGroupName = 'ppl-storagereplication-demo-cus-dns'
+param secondaryDnsResourceGroupName = 'ppl-storagereplication-demo-wus-dns'
+param primaryLocation = 'centralus'
+param secondaryLocation = 'westus'
+param environmentName = 'demo'
+param activeRegion = 'none'
+param acrPublicNetworkAccess = 'Enabled'
+param scheduleCronExpression = '*/10 * * * *'

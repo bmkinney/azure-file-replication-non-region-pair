@@ -1,0 +1,4 @@
+infra/main.json
+*.log
+.DS_Store
+.vscode/
