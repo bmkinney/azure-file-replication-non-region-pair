@@ -86,7 +86,7 @@ az account set --subscription <subscription-id>
 Clone the repository and create a local parameter file that Git ignores:
 
 ```bash
-git clone https://github.com/briankinney_microsoft/azure-file-replication-non-region-pair.git
+git clone https://github.com/bmkinney/azure-file-replication-non-region-pair.git
 cd azure-file-replication-non-region-pair
 cp infra/existing.example.bicepparam infra/existing.bicepparam
 ```
