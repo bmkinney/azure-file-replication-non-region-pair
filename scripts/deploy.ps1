@@ -1,10 +1,12 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
-    [string]$Location = 'centralus',
+    [string]$Location = 'southcentralus',
+    [string]$TemplateFile,
     [string]$ParametersFile = (Join-Path $PSScriptRoot '..\infra\main.bicepparam'),
     [string]$ImageContext = (Join-Path $PSScriptRoot '..\src\azcopy-job'),
-    [string]$ImageRepository = 'ppl-azcopy-job',
+    [string]$ImageRepository = 'azure-files-dr-azcopy',
     [string]$ImageTag = '10.30.1',
+    [string]$ContainerImage,
     [switch]$SkipWhatIf
 )
 
@@ -22,7 +24,14 @@ function Invoke-AzCli {
 }
 
 $null = Invoke-AzCli -Arguments @('account', 'show', '--output', 'none')
-$templateFile = Join-Path $PSScriptRoot '..\infra\main.bicep'
+if ([string]::IsNullOrWhiteSpace($TemplateFile)) {
+    $parameterBaseName = [IO.Path]::GetFileNameWithoutExtension($ParametersFile)
+    $TemplateFile = Join-Path (Split-Path $ParametersFile) "$parameterBaseName.bicep"
+}
+if (-not (Test-Path $TemplateFile -PathType Leaf)) {
+    throw "Template file '$TemplateFile' was not found."
+}
+$isBrownfield = [IO.Path]::GetFileName($TemplateFile) -eq 'existing.bicep'
 $null = Invoke-AzCli -Arguments @('bicep', 'build', '--file', $templateFile, '--stdout')
 $null = Invoke-AzCli -Arguments @(
     'deployment', 'sub', 'validate',
@@ -39,45 +48,66 @@ if (-not $SkipWhatIf) {
     ) | Write-Host
 }
 
-if (-not $PSCmdlet.ShouldProcess('current subscription', 'Deploy the replication foundation, build AzCopy, and activate Central US')) {
+if ($ContainerImage -and $ContainerImage -notmatch '@sha256:[a-fA-F0-9]{64}$') {
+    throw 'ContainerImage must be pinned by digest: <registry>/<repository>@sha256:<64 hex characters>.'
+}
+
+if (-not $PSCmdlet.ShouldProcess('current subscription', 'Deploy the replication foundation and activate the primary region')) {
     return
 }
 
-$bootstrap = Invoke-AzCli -Arguments @(
+$bootstrapOverrides = @('activeRegion=none')
+if (-not $isBrownfield) {
+    $bootstrapOverrides += 'acrPublicNetworkAccess=Enabled'
+}
+$bootstrapArguments = @(
     'deployment', 'sub', 'create',
-    '--name', "ppl-storage-replication-bootstrap-$(Get-Date -Format 'yyyyMMddHHmmss')",
+    '--name', "azure-files-dr-bootstrap-$(Get-Date -Format 'yyyyMMddHHmmss')",
     '--location', $Location,
     '--parameters', $ParametersFile,
-    '--parameters', 'activeRegion=none', 'acrPublicNetworkAccess=Enabled',
+    '--parameters'
+) + $bootstrapOverrides + @(
     '--output', 'json'
-) | ConvertFrom-Json
+)
+$bootstrap = Invoke-AzCli -Arguments $bootstrapArguments | ConvertFrom-Json
 
 $registryName = $bootstrap.properties.outputs.registryName.value
-$null = Invoke-AzCli -Arguments @(
-    'acr', 'build',
-    '--registry', $registryName,
-    '--image', "${ImageRepository}:${ImageTag}",
-    $ImageContext,
-    '--output', 'none'
-)
+if ($ContainerImage) {
+    $image = $ContainerImage
+} else {
+    $null = Invoke-AzCli -Arguments @(
+        'acr', 'build',
+        '--registry', $registryName,
+        '--image', "${ImageRepository}:${ImageTag}",
+        $ImageContext,
+        '--output', 'none'
+    )
 
-$digest = Invoke-AzCli -Arguments @(
-    'acr', 'manifest', 'show-metadata',
-    "${ImageRepository}:${ImageTag}",
-    '--registry', $registryName,
-    '--query', 'digest',
-    '--output', 'tsv'
-)
-$image = "${registryName}.azurecr.io/${ImageRepository}@$($digest.Trim())"
+    $digest = Invoke-AzCli -Arguments @(
+        'acr', 'manifest', 'show-metadata',
+        "${registryName}.azurecr.io/${ImageRepository}:${ImageTag}",
+        '--registry', $registryName,
+        '--query', 'digest',
+        '--output', 'tsv',
+        '--only-show-errors'
+    )
+    $image = "${registryName}.azurecr.io/${ImageRepository}@$($digest.Trim())"
+}
 
-$final = Invoke-AzCli -Arguments @(
+$finalOverrides = @("containerImage=$image", 'activeRegion=primary')
+if (-not $isBrownfield) {
+    $finalOverrides += 'acrPublicNetworkAccess=Disabled'
+}
+$finalArguments = @(
     'deployment', 'sub', 'create',
-    '--name', "ppl-storage-replication-final-$(Get-Date -Format 'yyyyMMddHHmmss')",
+    '--name', "azure-files-dr-final-$(Get-Date -Format 'yyyyMMddHHmmss')",
     '--location', $Location,
     '--parameters', $ParametersFile,
-    '--parameters', "containerImage=$image", 'activeRegion=primary', 'acrPublicNetworkAccess=Disabled',
+    '--parameters'
+) + $finalOverrides + @(
     '--output', 'json'
-) | ConvertFrom-Json
+)
+$final = Invoke-AzCli -Arguments $finalArguments | ConvertFrom-Json
 
 Write-Host "Primary scheduled job: $($final.properties.outputs.primaryJobName.value)"
 Write-Host "Secondary standby job: $($final.properties.outputs.secondaryJobName.value)"

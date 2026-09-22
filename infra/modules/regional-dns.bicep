@@ -7,7 +7,7 @@ param tags object
 var zones = [
   'privatelink.file.${environment().suffixes.storage}'
   'privatelink.blob.${environment().suffixes.storage}'
-  'privatelink.${environment().suffixes.acrLoginServer}'
+  'privatelink${environment().suffixes.acrLoginServer}'
 ]
 
 resource privateDnsZones 'Microsoft.Network/privateDnsZones@2024-06-01' = [for zoneName in zones: {

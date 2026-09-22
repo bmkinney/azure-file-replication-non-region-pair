@@ -46,8 +46,8 @@ exit_code=$?
 set -e
 
 if [ "$exit_code" -ne 0 ]; then
-    echo "PPL_REPLICATION_FAILED exitCode=$exit_code" >&2
+    echo "AZURE_FILES_REPLICATION_FAILED exitCode=$exit_code" >&2
     exit "$exit_code"
 fi
 
-echo "PPL_REPLICATION_SUCCEEDED"
+echo "AZURE_FILES_REPLICATION_SUCCEEDED"

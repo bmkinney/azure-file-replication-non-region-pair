@@ -1,15 +1,18 @@
 targetScope = 'subscription'
 
 @description('Resource group for the replication workload.')
-param resourceGroupName string = 'ppl-storagereplication-demo'
+param resourceGroupName string = 'rg-azure-files-replication-demo'
 
-@description('Resource group for the Central US split-horizon private DNS zones.')
-param primaryDnsResourceGroupName string = '${resourceGroupName}-cus-dns'
+@description('Resource group for the primary-region split-horizon private DNS zones.')
+param primaryDnsResourceGroupName string = '${resourceGroupName}-primary-dns'
 
-@description('Resource group for the West US split-horizon private DNS zones.')
-param secondaryDnsResourceGroupName string = '${resourceGroupName}-wus-dns'
+@description('Resource group for the secondary-region split-horizon private DNS zones.')
+param secondaryDnsResourceGroupName string = '${resourceGroupName}-secondary-dns'
 
-param primaryLocation string = 'centralus'
+@description('Resource group metadata location. Keep the current value because resource group locations are immutable.')
+param resourceGroupLocation string = 'centralus'
+
+param primaryLocation string = 'southcentralus'
 param secondaryLocation string = 'westus'
 param environmentName string = 'demo'
 
@@ -34,13 +37,13 @@ param scheduleCronExpression string = '*/10 * * * *'
 
 param tags object = {
   Environment: environmentName
-  Workload: 'ppl-storage-replication'
+  Workload: 'azure-files-dr-replication'
   ManagedBy: 'Bicep'
 }
 
 resource workloadResourceGroup 'Microsoft.Resources/resourceGroups@2024-11-01' = {
   name: resourceGroupName
-  location: primaryLocation
+  location: resourceGroupLocation
   tags: tags
 }
 

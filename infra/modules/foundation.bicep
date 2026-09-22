@@ -13,9 +13,9 @@ param tags object
 
 var primaryToken = uniqueString(subscription().id, resourceGroup().id, environmentName, primaryLocation)
 var secondaryToken = uniqueString(subscription().id, resourceGroup().id, environmentName, secondaryLocation)
-var globalToken = uniqueString(subscription().id, resourceGroup().id, environmentName)
-var primaryVnetName = 'vnet-${environmentName}-cus'
-var secondaryVnetName = 'vnet-${environmentName}-wus'
+var registryToken = uniqueString(subscription().id, resourceGroup().id, environmentName, primaryLocation)
+var primaryVnetName = 'vnet-${environmentName}-primary'
+var secondaryVnetName = 'vnet-${environmentName}-secondary'
 var primaryFileStorageName = 'stfile${primaryToken}'
 var secondaryFileStorageName = 'stfile${secondaryToken}'
 var primaryBlobStorageName = 'stblob${primaryToken}'
@@ -23,9 +23,9 @@ var secondaryBlobStorageName = 'stblob${secondaryToken}'
 var primaryFileShareName = 'files-primary'
 var secondaryFileShareName = 'files-secondary'
 var blobContainerName = 'replication'
-var registryName = 'acr${globalToken}'
-var primaryIdentityName = 'id-replication-cus-${primaryToken}'
-var secondaryIdentityName = 'id-replication-wus-${secondaryToken}'
+var registryName = 'acr${registryToken}'
+var primaryIdentityName = 'id-replication-primary-${primaryToken}'
+var secondaryIdentityName = 'id-replication-secondary-${secondaryToken}'
 var fileDataRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '69566ab7-960f-475b-8e7c-b3118f30c6bd')
 var acrPullRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
 var sourceFileUrl = 'https://${primaryFileStorageName}.file.${environment().suffixes.storage}/${primaryFileShareName}'
@@ -157,7 +157,7 @@ resource secondaryFileStorage 'Microsoft.Storage/storageAccounts@2025-01-01' = {
     RegionRole: 'secondary'
     DataRole: 'files'
   })
-  sku: { name: 'Standard_ZRS' }
+  sku: { name: 'Standard_LRS' }
   kind: 'StorageV2'
   properties: {
     allowBlobPublicAccess: false
@@ -240,7 +240,7 @@ resource secondaryBlobStorage 'Microsoft.Storage/storageAccounts@2025-01-01' = {
     RegionRole: 'secondary'
     DataRole: 'blob'
   })
-  sku: { name: 'Standard_ZRS' }
+  sku: { name: 'Standard_LRS' }
   kind: 'StorageV2'
   properties: {
     allowBlobPublicAccess: false
@@ -315,13 +315,13 @@ resource registryReplication 'Microsoft.ContainerRegistry/registries/replication
   name: secondaryLocation
   location: secondaryLocation
   tags: tags
-  properties: { zoneRedundancy: 'Enabled' }
+  properties: { zoneRedundancy: 'Disabled' }
 }
 
 module primaryPrimaryFilePe 'storage-private-endpoint.bicep' = {
   name: 'primary-primary-file-pe'
   params: {
-    name: 'pe-cus-primary-file'
+    name: 'pe-primary-primary-file'
     location: primaryLocation
     subnetId: primaryStorageSubnet.id
     storageAccountId: primaryFileStorage.id
@@ -333,7 +333,7 @@ module primaryPrimaryFilePe 'storage-private-endpoint.bicep' = {
 module primarySecondaryFilePe 'storage-private-endpoint.bicep' = {
   name: 'primary-secondary-file-pe'
   params: {
-    name: 'pe-cus-secondary-file'
+    name: 'pe-primary-secondary-file'
     location: primaryLocation
     subnetId: primaryStorageSubnet.id
     storageAccountId: secondaryFileStorage.id
@@ -345,7 +345,7 @@ module primarySecondaryFilePe 'storage-private-endpoint.bicep' = {
 module secondaryPrimaryFilePe 'storage-private-endpoint.bicep' = {
   name: 'secondary-primary-file-pe'
   params: {
-    name: 'pe-wus-primary-file'
+    name: 'pe-secondary-primary-file'
     location: secondaryLocation
     subnetId: secondaryStorageSubnet.id
     storageAccountId: primaryFileStorage.id
@@ -357,7 +357,7 @@ module secondaryPrimaryFilePe 'storage-private-endpoint.bicep' = {
 module secondarySecondaryFilePe 'storage-private-endpoint.bicep' = {
   name: 'secondary-secondary-file-pe'
   params: {
-    name: 'pe-wus-secondary-file'
+    name: 'pe-secondary-secondary-file'
     location: secondaryLocation
     subnetId: secondaryStorageSubnet.id
     storageAccountId: secondaryFileStorage.id
@@ -369,7 +369,7 @@ module secondarySecondaryFilePe 'storage-private-endpoint.bicep' = {
 module primaryBlobPe 'storage-private-endpoint.bicep' = {
   name: 'primary-blob-pe'
   params: {
-    name: 'pe-cus-blob'
+    name: 'pe-primary-blob'
     location: primaryLocation
     subnetId: primaryStorageSubnet.id
     storageAccountId: primaryBlobStorage.id
@@ -381,7 +381,7 @@ module primaryBlobPe 'storage-private-endpoint.bicep' = {
 module secondaryBlobPe 'storage-private-endpoint.bicep' = {
   name: 'secondary-blob-pe'
   params: {
-    name: 'pe-wus-blob'
+    name: 'pe-secondary-blob'
     location: secondaryLocation
     subnetId: secondaryStorageSubnet.id
     storageAccountId: secondaryBlobStorage.id
@@ -393,7 +393,7 @@ module secondaryBlobPe 'storage-private-endpoint.bicep' = {
 module primaryAcrPe 'storage-private-endpoint.bicep' = {
   name: 'primary-acr-pe'
   params: {
-    name: 'pe-cus-acr'
+    name: 'pe-primary-acr'
     location: primaryLocation
     subnetId: primaryStorageSubnet.id
     storageAccountId: registry.id
@@ -405,7 +405,7 @@ module primaryAcrPe 'storage-private-endpoint.bicep' = {
 module secondaryAcrPe 'storage-private-endpoint.bicep' = {
   name: 'secondary-acr-pe'
   params: {
-    name: 'pe-wus-acr'
+    name: 'pe-secondary-acr'
     location: secondaryLocation
     subnetId: secondaryStorageSubnet.id
     storageAccountId: registry.id
@@ -487,7 +487,7 @@ resource secondaryAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' =
 }
 
 resource primaryLog 'Microsoft.OperationalInsights/workspaces@2025-02-01' = {
-  name: 'log-replication-cus-${primaryToken}'
+  name: 'log-replication-primary-${primaryToken}'
   location: primaryLocation
   tags: tags
   properties: {
@@ -497,7 +497,7 @@ resource primaryLog 'Microsoft.OperationalInsights/workspaces@2025-02-01' = {
   }
 }
 resource secondaryLog 'Microsoft.OperationalInsights/workspaces@2025-02-01' = {
-  name: 'log-replication-wus-${secondaryToken}'
+  name: 'log-replication-secondary-${secondaryToken}'
   location: secondaryLocation
   tags: tags
   properties: {
@@ -508,7 +508,7 @@ resource secondaryLog 'Microsoft.OperationalInsights/workspaces@2025-02-01' = {
 }
 
 resource primaryEnvironment 'Microsoft.App/managedEnvironments@2025-01-01' = {
-  name: 'cae-replication-cus-${primaryToken}'
+  name: 'cae-replication-primary-${primaryToken}'
   location: primaryLocation
   tags: tags
   properties: {
@@ -523,11 +523,11 @@ resource primaryEnvironment 'Microsoft.App/managedEnvironments@2025-01-01' = {
       infrastructureSubnetId: primaryDefaultSubnet.id
       internal: true
     }
-    zoneRedundant: true
+    zoneRedundant: false
   }
 }
 resource secondaryEnvironment 'Microsoft.App/managedEnvironments@2025-01-01' = {
-  name: 'cae-replication-wus-${secondaryToken}'
+  name: 'cae-replication-secondary-${secondaryToken}'
   location: secondaryLocation
   tags: tags
   properties: {
@@ -596,7 +596,7 @@ var secondaryJobConfiguration = activeRegion == 'secondary' ? {
 }
 
 resource primaryJob 'Microsoft.App/jobs@2025-01-01' = {
-  name: 'job-replication-cus-${primaryToken}'
+  name: 'job-sync-primary-${primaryToken}'
   location: primaryLocation
   tags: tags
   identity: {
@@ -634,7 +634,7 @@ resource primaryJob 'Microsoft.App/jobs@2025-01-01' = {
 }
 
 resource secondaryJob 'Microsoft.App/jobs@2025-01-01' = {
-  name: 'job-replication-wus-${secondaryToken}'
+  name: 'job-sync-secondary-${secondaryToken}'
   location: secondaryLocation
   tags: tags
   identity: {

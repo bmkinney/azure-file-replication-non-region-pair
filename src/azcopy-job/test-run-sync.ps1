@@ -8,8 +8,8 @@ $requiredFragments = @(
     '--delete-destination="$delete_destination"',
     '--output-type=json',
     'Source and destination URLs must differ',
-    'PPL_REPLICATION_FAILED',
-    'PPL_REPLICATION_SUCCEEDED'
+    'AZURE_FILES_REPLICATION_FAILED',
+    'AZURE_FILES_REPLICATION_SUCCEEDED'
 )
 
 foreach ($fragment in $requiredFragments) {

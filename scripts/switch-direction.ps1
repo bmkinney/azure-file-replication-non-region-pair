@@ -7,9 +7,10 @@ param(
     [Parameter(Mandatory)]
     [switch]$WritesFenced,
 
-    [string]$ResourceGroupName = 'ppl-storagereplication-demo',
-    [string]$Location = 'centralus',
-    [string]$ParametersFile = (Join-Path $PSScriptRoot '..\infra\main.bicepparam')
+    [string]$ResourceGroupName = 'rg-azure-files-replication-demo',
+    [string]$Location = 'southcentralus',
+    [string]$ParametersFile = (Join-Path $PSScriptRoot '..\infra\main.bicepparam'),
+    [string]$TemplateFile
 )
 
 Set-StrictMode -Version Latest
@@ -28,11 +29,19 @@ function Invoke-AzCli {
 if (-not $WritesFenced) {
     throw 'WritesFenced is required. Stop application writes before changing replication direction.'
 }
+if ([string]::IsNullOrWhiteSpace($TemplateFile)) {
+    $parameterBaseName = [IO.Path]::GetFileNameWithoutExtension($ParametersFile)
+    $TemplateFile = Join-Path (Split-Path $ParametersFile) "$parameterBaseName.bicep"
+}
+if (-not (Test-Path $TemplateFile -PathType Leaf)) {
+    throw "Template file '$TemplateFile' was not found."
+}
+$isBrownfield = [IO.Path]::GetFileName($TemplateFile) -eq 'existing.bicep'
 
 $jobs = Invoke-AzCli -Arguments @(
     'containerapp', 'job', 'list',
     '--resource-group', $ResourceGroupName,
-    '--query', "[?tags.Workload=='ppl-storage-replication'].[name,location,properties.template.containers[0].image]",
+    '--query', "[?tags.Workload=='azure-files-dr-replication'].[name,location,properties.template.containers[0].image]",
     '--output', 'json'
 ) | ConvertFrom-Json
 
@@ -62,14 +71,20 @@ if (-not $PSCmdlet.ShouldProcess($ResourceGroupName, "Set '$ActiveRegion' as the
     return
 }
 
-$deployment = Invoke-AzCli -Arguments @(
+$deploymentOverrides = @("containerImage=$($images[0])", "activeRegion=$ActiveRegion")
+if (-not $isBrownfield) {
+    $deploymentOverrides += 'acrPublicNetworkAccess=Disabled'
+}
+$deploymentArguments = @(
     'deployment', 'sub', 'create',
-    '--name', "ppl-storage-replication-switch-$(Get-Date -Format 'yyyyMMddHHmmss')",
+    '--name', "azure-files-dr-switch-$(Get-Date -Format 'yyyyMMddHHmmss')",
     '--location', $Location,
     '--parameters', $ParametersFile,
-    '--parameters', "containerImage=$($images[0])", "activeRegion=$ActiveRegion", 'acrPublicNetworkAccess=Disabled',
+    '--parameters'
+) + $deploymentOverrides + @(
     '--output', 'json'
-) | ConvertFrom-Json
+)
+$deployment = Invoke-AzCli -Arguments $deploymentArguments | ConvertFrom-Json
 
 $activeJob = if ($ActiveRegion -eq 'primary') {
     $deployment.properties.outputs.primaryJobName.value
