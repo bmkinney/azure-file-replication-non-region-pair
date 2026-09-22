@@ -4,7 +4,7 @@ Bicep and Azure CLI deployment for private Azure Files replication between two A
 
 ## Architecture
 
-<!-- mermaid-checked: no \n, no em-dash/en-dash, no {} in labels, subgraphs are id["label"], arrows are -->|"label"|, all subgraphs closed by end, ids unique -->
+<!-- mermaid-checked: safe labels, quoted edge labels, closed subgraphs, and unique ids -->
 ```mermaid
 flowchart LR
 	subgraph PrimaryRegion["Primary region VNet"]
