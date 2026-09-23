@@ -106,7 +106,7 @@ module registryRbac 'existing-acr-rbac.bicep' = {
   }
 }
 
-resource primaryLog 'Microsoft.OperationalInsights/workspaces@2025-02-01' = {
+resource primaryLog 'Microsoft.OperationalInsights/workspaces@2025-04-01' = {
   name: 'log-replication-${primaryRegionCode}-${primaryToken}'
   location: primaryLocation
   tags: tags
@@ -117,7 +117,7 @@ resource primaryLog 'Microsoft.OperationalInsights/workspaces@2025-02-01' = {
   }
 }
 
-resource secondaryLog 'Microsoft.OperationalInsights/workspaces@2025-02-01' = {
+resource secondaryLog 'Microsoft.OperationalInsights/workspaces@2025-04-01' = {
   name: 'log-replication-${secondaryRegionCode}-${secondaryToken}'
   location: secondaryLocation
   tags: tags

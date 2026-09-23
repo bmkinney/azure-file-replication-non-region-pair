@@ -209,6 +209,27 @@ az monitor metrics alert list --resource-group <replication-resource-group> --ou
 az monitor scheduled-query list --resource-group <replication-resource-group> --output table
 ```
 
+View each workspace GUID and its latest successful replication markers from Azure Cloud Shell. The explicit management API version avoids Azure CLI releases that select the unsupported `2025-02-01` workspace API:
+
+```bash
+RG='<replication-resource-group>'
+SUB=$(az account show --query id --output tsv)
+
+az rest --method get \
+	--url "https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.OperationalInsights/workspaces?api-version=2025-04-01" \
+	--query "value[].{Name:name,WorkspaceId:properties.customerId}" --output table
+
+az monitor log-analytics query \
+	--workspace '<workspace-guid>' \
+	--analytics-query 'ContainerAppConsoleLogs_CL
+	| where Log_s contains "AZURE_FILES_REPLICATION_SUCCEEDED"
+	| project TimeGenerated, Log_s
+	| order by TimeGenerated desc
+	| take 10' --output table
+```
+
+Run the query with each workspace GUID to inspect both regional jobs. Before the first Container Apps log is ingested, the custom table does not exist and the query returns a table-resolution error rather than replication history.
+
 Before production use, test the Action Group from its **Test action group** pane in the Azure portal. In a nonproduction deployment, also induce one controlled failed execution and pause the active schedule long enough to cross a shortened threshold. Confirm the Sev 1 and Sev 2 emails arrive, then restore a successful execution and verify both alert instances resolve. Do not test freshness by stopping production replication.
 
 ## Switch direction
