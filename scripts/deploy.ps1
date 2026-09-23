@@ -111,4 +111,5 @@ $final = Invoke-AzCli -Arguments $finalArguments | ConvertFrom-Json
 
 Write-Host "Primary scheduled job: $($final.properties.outputs.primaryJobName.value)"
 Write-Host "Secondary standby job: $($final.properties.outputs.secondaryJobName.value)"
+Write-Host "Monitoring action group: $($final.properties.outputs.monitoringActionGroupId.value)"
 Write-Host "Pinned image: $image"

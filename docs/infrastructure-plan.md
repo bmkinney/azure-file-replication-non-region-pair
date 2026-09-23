@@ -17,6 +17,7 @@ Deploy private, active/passive Azure Files replication across two customer-selec
 - The greenfield profile uses ZRS for primary storage and LRS for secondary storage. Confirm those SKUs are available in the selected regions before deployment.
 - A Premium ACR in the primary region with geo-replication to the secondary region and a private endpoint in each VNet.
 - Regional Log Analytics workspaces.
+- One shared Azure Monitor email Action Group, two job-failure metric alerts, and one freshness query alert per regional workspace.
 
 ## Replication state
 
@@ -31,6 +32,25 @@ The schedule starts every 10 minutes. This is a cadence, not a guaranteed RPO. A
 
 Destination deletion is disabled. The initial rollout prioritizes recoverability over mirroring source deletions.
 
+## Monitoring state
+
+Job failure and replication freshness are separate signals:
+
+- Each Container Apps Job has a Sev 1 metric alert over the native `Executions` metric filtered to `state=Failed`. Both rules remain enabled so a failed manual execution in the standby region is observable.
+- Each Log Analytics workspace has a Sev 2 scheduled query rule that looks for `AZURE_FILES_REPLICATION_SUCCEEDED` in consecutive 10-minute windows. The number of required missing windows is derived from the configured 20-, 30-, or 60-minute lag threshold.
+- Freshness represents elapsed time since the last completed successful AzCopy run. It does not compare individual file timestamps or guarantee a per-file RPO.
+- All rules use stateful auto-mitigation and notify the same email Action Group with Common Alert Schema.
+
+Freshness follows the active/passive state:
+
+| `activeRegion` | Primary failure | Secondary failure | Primary freshness | Secondary freshness |
+| --- | --- | --- | --- | --- |
+| `none` | Enabled | Enabled | Disabled | Disabled |
+| `primary` | Enabled | Enabled | Enabled | Disabled |
+| `secondary` | Enabled | Enabled | Disabled | Enabled |
+
+Direction changes use a full Bicep deployment, so the freshness-rule state changes with the job schedules. No separate alert toggle or DNS change is required.
+
 ## Failover controls
 
 Before changing direction:
@@ -41,5 +61,6 @@ Before changing direction:
 4. Run a final synchronization when the old source is reachable.
 5. Use `scripts/switch-direction.ps1` to enable only the intended regional schedule.
 6. Start or observe one execution and validate representative files before releasing writes.
+7. Confirm the new active direction's freshness alert is enabled and the prior direction's alert is disabled.
 
 Opposing directions must never run concurrently. Conflict reconciliation remains an operator responsibility if both shares received writes.

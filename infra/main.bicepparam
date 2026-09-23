@@ -10,3 +10,8 @@ param environmentName = 'demo'
 param activeRegion = 'none'
 param acrPublicNetworkAccess = 'Enabled'
 param scheduleCronExpression = '*/10 * * * *'
+param alertEmailAddresses = [
+	'replace-with-operations@example.com'
+]
+param replicationLagThresholdMinutes = 30
+param monitoringEnabled = true

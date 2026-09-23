@@ -26,6 +26,12 @@ flowchart LR
 		SecondaryFiles[("Secondary Azure Files")]
 		Registry[("Premium Azure Container Registry")]
 	end
+	subgraph Monitoring["Monitoring and notification"]
+		PrimaryLogs[("Primary Log Analytics")]
+		SecondaryLogs[("Secondary Log Analytics")]
+		AzureMonitor["Azure Monitor alerts"]
+		OperationsEmail["Operations email"]
+	end
 
 	PrimaryJob -->|"resolve private addresses"| PrimaryDns
 	PrimaryJob -->|"read with managed identity"| PrimaryFileEndpoint
@@ -42,6 +48,13 @@ flowchart LR
 	SecondaryRemoteEndpoint --> PrimaryFiles
 	SecondaryFileEndpoint --> SecondaryFiles
 	SecondaryAcrEndpoint --> Registry
+	PrimaryJob -->|"success logs"| PrimaryLogs
+	SecondaryJob -.->|"success logs"| SecondaryLogs
+	PrimaryJob -->|"execution metrics"| AzureMonitor
+	SecondaryJob -->|"execution metrics"| AzureMonitor
+	PrimaryLogs -->|"freshness query"| AzureMonitor
+	SecondaryLogs -->|"freshness query"| AzureMonitor
+	AzureMonitor -->|"common alert schema"| OperationsEmail
 ```
 
 The VNets are intentionally not peered. Each VNet has private endpoints for both file accounts and ACR, with its own split-horizon Private DNS zones. Only one replication direction is scheduled at a time.
@@ -53,6 +66,7 @@ The VNets are intentionally not peered. Each VNet has private endpoints for both
 - Regional split-horizon Azure Private DNS zones prevent cross-region private endpoint DNS ambiguity.
 - Managed identities authenticate to Azure Files; no storage keys or SAS tokens are used.
 - The selected primary region synchronizes forward. The secondary region is a manual standby with reverse synchronization preconfigured.
+- Azure Monitor sends email for failed executions and when the active direction has no successful replication within the configured threshold.
 - The requested regional blob accounts and private containers are provisioned for application/demo use; they are not part of the Azure Files transfer path.
 
 See [docs/infrastructure-plan.md](docs/infrastructure-plan.md) for topology and failover controls.
@@ -60,7 +74,7 @@ See [docs/infrastructure-plan.md](docs/infrastructure-plan.md) for topology and 
 ## Deployment profiles
 
 - `infra/main.bicep` creates the complete demonstration topology, including storage, VNets, endpoints, DNS, and ACR.
-- `infra/existing.bicep` references customer-owned storage, networking, private endpoints, DNS, and Premium ACR. It creates only replication identities and RBAC, Log Analytics workspaces, Container Apps environments, and jobs.
+- `infra/existing.bicep` references customer-owned storage, networking, private endpoints, DNS, and Premium ACR. It creates replication identities and RBAC, Log Analytics workspaces, Container Apps environments and jobs, and Azure Monitor alerting resources.
 
 The existing-resource profile is additive. It does not redeploy or change the supplied storage accounts, VNets, private endpoints, private DNS zones, or ACR.
 
@@ -92,6 +106,8 @@ cp infra/existing.example.bicepparam infra/existing.bicepparam
 ```
 
 Edit every placeholder in `infra/existing.bicepparam`. The six endpoint IDs represent four file endpoints, allowing both VNets to reach both file accounts, plus one ACR endpoint in each VNet. The endpoints and corresponding `privatelink.file.*` and `privatelink.azurecr.io` DNS records must already work from the supplied VNets.
+
+Set `alertEmailAddresses` to one or more monitored operations addresses. The deployment creates an Azure Monitor Action Group and enables Common Alert Schema for every receiver. Supported `replicationLagThresholdMinutes` values are `20`, `30`, and `60`; the default is `30`.
 
 Validate and preview the additive deployment:
 
@@ -144,6 +160,31 @@ pwsh ./scripts/deploy.ps1
 ```
 
 Deployment changes Azure resources and is intentionally not run automatically from this repository.
+
+## Monitoring and alerts
+
+Both deployment profiles create the following stateful Azure Monitor rules:
+
+| Alert | Severity | Signal | Enabled state |
+| --- | --- | --- | --- |
+| Primary job failed | Sev 1 | `Microsoft.App/jobs` `Executions` metric with `state=Failed` | Always when monitoring is enabled |
+| Secondary job failed | Sev 1 | `Microsoft.App/jobs` `Executions` metric with `state=Failed` | Always when monitoring is enabled |
+| Primary replication stale | Sev 2 | No `AZURE_FILES_REPLICATION_SUCCEEDED` console marker for the configured threshold | Only when `activeRegion=primary` |
+| Secondary replication stale | Sev 2 | No `AZURE_FILES_REPLICATION_SUCCEEDED` console marker for the configured threshold | Only when `activeRegion=secondary` |
+
+Failed-execution alerts cover scheduled and manually started jobs, including failures where the AzCopy wrapper cannot emit an error marker. Freshness is an operational RPO signal: it measures time since a completed successful AzCopy run, not the age or equality of every file. With `activeRegion=none`, both freshness rules are disabled so bootstrap and planned pauses do not generate stale-replication notifications.
+
+`switch-direction.ps1` redeploys the templates with the new `activeRegion`. The old direction's freshness rule is disabled and the new direction's rule is enabled as part of that deployment. Alerts automatically resolve after their conditions clear.
+
+Inspect the deployed resources:
+
+```powershell
+az monitor action-group list --resource-group <replication-resource-group> --output table
+az monitor metrics alert list --resource-group <replication-resource-group> --output table
+az monitor scheduled-query list --resource-group <replication-resource-group> --output table
+```
+
+Before production use, test the Action Group from its **Test action group** pane in the Azure portal. In a nonproduction deployment, also induce one controlled failed execution and pause the active schedule long enough to cross a shortened threshold. Confirm the Sev 1 and Sev 2 emails arrive, then restore a successful execution and verify both alert instances resolve. Do not test freshness by stopping production replication.
 
 ## Switch direction
 

@@ -283,6 +283,12 @@ resource secondaryJob 'Microsoft.App/jobs@2025-01-01' = {
 
 output primaryJobName string = primaryJob.name
 output secondaryJobName string = secondaryJob.name
+output primaryJobId string = primaryJob.id
+output secondaryJobId string = secondaryJob.id
+output primaryLogWorkspaceId string = primaryLog.id
+output primaryLogWorkspaceName string = primaryLog.name
+output secondaryLogWorkspaceId string = secondaryLog.id
+output secondaryLogWorkspaceName string = secondaryLog.name
 output registryName string = registry.name
 output primaryFileStorageAccountName string = primaryStorage.name
 output secondaryFileStorageAccountName string = secondaryStorage.name

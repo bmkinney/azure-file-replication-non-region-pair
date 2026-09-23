@@ -45,6 +45,21 @@ param activeRegion string = 'none'
 param containerImage string = 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest'
 param scheduleCronExpression string = '*/10 * * * *'
 
+@minLength(1)
+@description('Email addresses that receive Azure Monitor replication alerts.')
+param alertEmailAddresses array
+
+@allowed([
+  20
+  30
+  60
+])
+@description('Minutes without a successful active-direction replication before an alert is raised.')
+param replicationLagThresholdMinutes int = 30
+
+@description('Creates and enables Azure Monitor alerting resources when true.')
+param monitoringEnabled bool = true
+
 param tags object = {
   Environment: environmentName
   Workload: 'azure-files-dr-replication'
@@ -88,6 +103,27 @@ module foundation 'modules/existing-foundation.bicep' = {
   }
 }
 
+module monitoring 'modules/monitoring.bicep' = {
+  name: 'existing-storage-replication-monitoring'
+  scope: workloadResourceGroup
+  params: {
+    environmentName: environmentName
+    primaryLocation: primaryLocation
+    secondaryLocation: secondaryLocation
+    activeRegion: activeRegion
+    primaryJobId: foundation.outputs.primaryJobId
+    primaryJobName: foundation.outputs.primaryJobName
+    secondaryJobId: foundation.outputs.secondaryJobId
+    secondaryJobName: foundation.outputs.secondaryJobName
+    primaryLogWorkspaceId: foundation.outputs.primaryLogWorkspaceId
+    secondaryLogWorkspaceId: foundation.outputs.secondaryLogWorkspaceId
+    alertEmailAddresses: alertEmailAddresses
+    replicationLagThresholdMinutes: replicationLagThresholdMinutes
+    monitoringEnabled: monitoringEnabled
+    tags: tags
+  }
+}
+
 output resourceGroupName string = workloadResourceGroup.name
 output primaryJobName string = foundation.outputs.primaryJobName
 output secondaryJobName string = foundation.outputs.secondaryJobName
@@ -96,3 +132,10 @@ output primaryFileStorageAccountName string = foundation.outputs.primaryFileStor
 output secondaryFileStorageAccountName string = foundation.outputs.secondaryFileStorageAccountName
 output primaryFileShareName string = foundation.outputs.primaryFileShareName
 output secondaryFileShareName string = foundation.outputs.secondaryFileShareName
+output primaryLogWorkspaceName string = foundation.outputs.primaryLogWorkspaceName
+output secondaryLogWorkspaceName string = foundation.outputs.secondaryLogWorkspaceName
+output monitoringActionGroupId string = monitoring.outputs.actionGroupId
+output primaryFailureAlertId string = monitoring.outputs.primaryFailureAlertId
+output secondaryFailureAlertId string = monitoring.outputs.secondaryFailureAlertId
+output primaryFreshnessAlertId string = monitoring.outputs.primaryFreshnessAlertId
+output secondaryFreshnessAlertId string = monitoring.outputs.secondaryFreshnessAlertId

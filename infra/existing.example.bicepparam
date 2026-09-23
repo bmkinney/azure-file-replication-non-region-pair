@@ -40,3 +40,8 @@ param activeRegion = 'none'
 // Example: myregistry.azurecr.io/azure-files-dr@sha256:<64-hex-digest>
 param containerImage = '<existing-acr-login-server>/<repository>@sha256:<digest>'
 param scheduleCronExpression = '*/10 * * * *'
+param alertEmailAddresses = [
+  '<operations-email-address>'
+]
+param replicationLagThresholdMinutes = 30
+param monitoringEnabled = true
