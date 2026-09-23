@@ -35,7 +35,7 @@ param tags object = {}
 
 var monitoringToken = uniqueString(subscription().id, resourceGroup().id, environmentName)
 var actionGroupName = 'ag-replication-${monitoringToken}'
-var lagEvaluationPeriods = replicationLagThresholdMinutes / 10
+var lagWindowSize = 'PT${replicationLagThresholdMinutes}M'
 var emailReceivers = map(alertEmailAddresses, (emailAddress, index) => {
   name: 'replication-email-${index + 1}'
   emailAddress: emailAddress
@@ -151,7 +151,7 @@ resource primaryFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-0
     enabled: monitoringEnabled && activeRegion == 'primary'
     scopes: [primaryLogWorkspaceId]
     evaluationFrequency: 'PT10M'
-    windowSize: 'PT10M'
+    windowSize: lagWindowSize
     autoMitigate: true
     checkWorkspaceAlertsStorageConfigured: false
     skipQueryValidation: true
@@ -160,7 +160,7 @@ resource primaryFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-0
         {
           query: '''
             ContainerAppConsoleLogs_CL
-            | where TimeGenerated >= ago(10m)
+            | where TimeGenerated >= ago(${replicationLagThresholdMinutes}m)
             | where Log_s contains "AZURE_FILES_REPLICATION_SUCCEEDED"
             | summarize SuccessCount = count()
           '''
@@ -169,8 +169,8 @@ resource primaryFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-0
           operator: 'LessThan'
           threshold: 1
           failingPeriods: {
-            numberOfEvaluationPeriods: lagEvaluationPeriods
-            minFailingPeriodsToAlert: lagEvaluationPeriods
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
           }
         }
       ]
@@ -191,7 +191,7 @@ resource secondaryFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2026-03
     enabled: monitoringEnabled && activeRegion == 'secondary'
     scopes: [secondaryLogWorkspaceId]
     evaluationFrequency: 'PT10M'
-    windowSize: 'PT10M'
+    windowSize: lagWindowSize
     autoMitigate: true
     checkWorkspaceAlertsStorageConfigured: false
     skipQueryValidation: true
@@ -200,7 +200,7 @@ resource secondaryFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2026-03
         {
           query: '''
             ContainerAppConsoleLogs_CL
-            | where TimeGenerated >= ago(10m)
+            | where TimeGenerated >= ago(${replicationLagThresholdMinutes}m)
             | where Log_s contains "AZURE_FILES_REPLICATION_SUCCEEDED"
             | summarize SuccessCount = count()
           '''
@@ -209,8 +209,8 @@ resource secondaryFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2026-03
           operator: 'LessThan'
           threshold: 1
           failingPeriods: {
-            numberOfEvaluationPeriods: lagEvaluationPeriods
-            minFailingPeriodsToAlert: lagEvaluationPeriods
+            numberOfEvaluationPeriods: 1
+            minFailingPeriodsToAlert: 1
           }
         }
       ]
