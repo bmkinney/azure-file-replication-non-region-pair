@@ -154,6 +154,7 @@ resource primaryFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-0
     windowSize: 'PT10M'
     autoMitigate: true
     checkWorkspaceAlertsStorageConfigured: false
+    skipQueryValidation: true
     criteria: {
       allOf: [
         {
@@ -193,6 +194,7 @@ resource secondaryFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2026-03
     windowSize: 'PT10M'
     autoMitigate: true
     checkWorkspaceAlertsStorageConfigured: false
+    skipQueryValidation: true
     criteria: {
       allOf: [
         {

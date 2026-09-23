@@ -106,6 +106,7 @@ Job failure and replication freshness are separate signals:
 
 - Each Container Apps Job has a Sev 1 metric alert over the native `Executions` metric filtered to `state=Failed`. Both rules remain enabled so a failed manual execution in the standby region is observable.
 - Each Log Analytics workspace has a Sev 2 scheduled query rule that looks for `AZURE_FILES_REPLICATION_SUCCEEDED` in consecutive 10-minute windows. The number of required missing windows is derived from the configured 20-, 30-, or 60-minute lag threshold.
+- Scheduled-query validation is skipped when the alert resources are created because a new workspace does not contain `ContainerAppConsoleLogs_CL` until its first Container Apps log ingestion. Runtime evaluation uses the table normally after it is materialized.
 - Freshness represents elapsed time since the last completed successful AzCopy run. It does not compare individual file timestamps or guarantee a per-file RPO.
 - All rules use stateful auto-mitigation and notify the same email Action Group with Common Alert Schema.
 
