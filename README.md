@@ -209,14 +209,14 @@ az monitor metrics alert list --resource-group <replication-resource-group> --ou
 az monitor scheduled-query list --resource-group <replication-resource-group> --output table
 ```
 
-View each workspace GUID and its latest successful replication markers from Azure Cloud Shell. The explicit management API version avoids Azure CLI releases that select the unsupported `2025-02-01` workspace API:
+View each workspace GUID and its latest successful replication markers from Azure Cloud Shell. The explicit management API version avoids Azure CLI releases whose built-in workspace-list command selects an API version that the command path rejects:
 
 ```bash
 RG='<replication-resource-group>'
 SUB=$(az account show --query id --output tsv)
 
 az rest --method get \
-	--url "https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.OperationalInsights/workspaces?api-version=2025-04-01" \
+	--url "https://management.azure.com/subscriptions/$SUB/resourceGroups/$RG/providers/Microsoft.OperationalInsights/workspaces?api-version=2025-07-01" \
 	--query "value[].{Name:name,WorkspaceId:properties.customerId}" --output table
 
 az monitor log-analytics query \

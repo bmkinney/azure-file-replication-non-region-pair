@@ -486,7 +486,7 @@ resource secondaryAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' =
   }
 }
 
-resource primaryLog 'Microsoft.OperationalInsights/workspaces@2025-04-01' = {
+resource primaryLog 'Microsoft.OperationalInsights/workspaces@2025-02-01' = {
   name: 'log-replication-primary-${primaryToken}'
   location: primaryLocation
   tags: tags
@@ -496,7 +496,7 @@ resource primaryLog 'Microsoft.OperationalInsights/workspaces@2025-04-01' = {
     features: { enableLogAccessUsingOnlyResourcePermissions: true }
   }
 }
-resource secondaryLog 'Microsoft.OperationalInsights/workspaces@2025-04-01' = {
+resource secondaryLog 'Microsoft.OperationalInsights/workspaces@2025-02-01' = {
   name: 'log-replication-secondary-${secondaryToken}'
   location: secondaryLocation
   tags: tags
