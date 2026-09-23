@@ -36,6 +36,12 @@ param tags object = {}
 var monitoringToken = uniqueString(subscription().id, resourceGroup().id, environmentName)
 var actionGroupName = 'ag-replication-${monitoringToken}'
 var lagWindowSize = 'PT${replicationLagThresholdMinutes}M'
+var freshnessQuery = format('''
+  ContainerAppConsoleLogs_CL
+  | where TimeGenerated >= ago({0}m)
+  | where Log_s contains "AZURE_FILES_REPLICATION_SUCCEEDED"
+  | summarize SuccessCount = count()
+''', replicationLagThresholdMinutes)
 var emailReceivers = map(alertEmailAddresses, (emailAddress, index) => {
   name: 'replication-email-${index + 1}'
   emailAddress: emailAddress
@@ -158,12 +164,7 @@ resource primaryFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-0
     criteria: {
       allOf: [
         {
-          query: '''
-            ContainerAppConsoleLogs_CL
-            | where TimeGenerated >= ago(${replicationLagThresholdMinutes}m)
-            | where Log_s contains "AZURE_FILES_REPLICATION_SUCCEEDED"
-            | summarize SuccessCount = count()
-          '''
+          query: freshnessQuery
           timeAggregation: 'Maximum'
           metricMeasureColumn: 'SuccessCount'
           operator: 'LessThan'
@@ -198,12 +199,7 @@ resource secondaryFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2026-03
     criteria: {
       allOf: [
         {
-          query: '''
-            ContainerAppConsoleLogs_CL
-            | where TimeGenerated >= ago(${replicationLagThresholdMinutes}m)
-            | where Log_s contains "AZURE_FILES_REPLICATION_SUCCEEDED"
-            | summarize SuccessCount = count()
-          '''
+          query: freshnessQuery
           timeAggregation: 'Maximum'
           metricMeasureColumn: 'SuccessCount'
           operator: 'LessThan'

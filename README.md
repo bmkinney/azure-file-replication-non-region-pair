@@ -170,6 +170,7 @@ The deploying identity needs permission to create resources and role assignments
 az bicep build --file infra/main.bicep
 az deployment sub validate --location southcentralus --parameters infra/main.bicepparam
 az deployment sub what-if --location southcentralus --parameters infra/main.bicepparam
+pwsh ./tests/test-monitoring-template.ps1
 pwsh ./src/azcopy-job/test-run-sync.ps1
 ```
 
