@@ -1,4 +1,4 @@
-# Azure File Replication Non-Region Pair
+# Azure Files Replication Non-Region Pair
 
 Bicep and Azure CLI deployment for private Azure Files replication between two Azure regions that do not need to be an Azure paired-region set. Two regional Azure Container Apps Jobs run a digest-pinned AzCopy image in active/passive mode.
 
