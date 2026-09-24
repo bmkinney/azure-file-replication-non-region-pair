@@ -3,7 +3,9 @@ param(
     [string]$ParametersFile = (Join-Path $PSScriptRoot '..\infra\main.bicepparam'),
     [string]$Location,
     [switch]$SkipWhatIf,
-    [string]$OutputPath
+    [string]$OutputPath,
+    # name=value pairs applied after the parameter file, like extra --parameters arguments to the deployment.
+    [string[]]$ParameterOverrides = @()
 )
 
 Set-StrictMode -Version Latest
@@ -113,7 +115,32 @@ if (-not $build.Succeeded) {
 $suppliedParameters = ($build.Value.parametersJson | ConvertFrom-Json -Depth 100).parameters
 $templateParameters = ($build.Value.templateJson | ConvertFrom-Json -Depth 100).parameters
 
+$overrideValues = [ordered]@{}
+$overrideArguments = [System.Collections.Generic.List[string]]::new()
+foreach ($override in $ParameterOverrides) {
+    if ($override -notmatch '^([A-Za-z_][A-Za-z0-9_]*)=(.*)$') {
+        throw "Parameter override '$override' must use the form name=value."
+    }
+    $name = $Matches[1]
+    $rawValue = $Matches[2]
+    $declaration = Get-Property $templateParameters $name
+    if ($null -eq $declaration) {
+        Write-Host "Ignoring parameter override '$name': the template for $(Split-Path $ParametersFile -Leaf) doesn't declare it."
+        continue
+    }
+    $overrideValues[$name] = switch (([string](Get-Property $declaration 'type')).ToLowerInvariant()) {
+        'int' { [long]$rawValue }
+        'bool' { [bool]::Parse($rawValue) }
+        { $_ -in 'array', 'object' } { , (ConvertFrom-Json -InputObject $rawValue -Depth 100 -NoEnumerate) }
+        default { $rawValue }
+    }
+    $overrideArguments.Add("$name=$rawValue")
+}
+
 function Get-ParameterValue([string]$Name) {
+    if ($overrideValues.Contains($Name)) {
+        return $overrideValues[$Name]
+    }
     $supplied = Get-Property $suppliedParameters $Name
     if ($null -ne $supplied) {
         return Get-Property $supplied 'value'
@@ -133,10 +160,10 @@ if (-not $Location) {
     $Location = $primaryLocation
 }
 
-$placeholders = @($suppliedParameters.PSObject.Properties | Where-Object {
-    $value = Get-Property $_.Value 'value'
-    @($value) | Where-Object { $_ -is [string] -and $_ -match '<[^>]+>' }
-} | ForEach-Object { $_.Name })
+$parameterNames = @(@($suppliedParameters.PSObject.Properties | ForEach-Object Name) + @($overrideValues.Keys) | Select-Object -Unique)
+$placeholders = @($parameterNames | Where-Object {
+    @(Get-ParameterValue $_) | Where-Object { $_ -is [string] -and $_ -match '<[^>]+>' }
+})
 $hasPlaceholders = $placeholders.Count -gt 0
 if ($hasPlaceholders) {
     Add-Prerequisite -Area 'Parameters' -Item (Split-Path $ParametersFile -Leaf) -Status 'Action required' -Detail "Replace placeholder values: $($placeholders -join ', '). Resource lookups and what-if are skipped until then."
@@ -455,7 +482,11 @@ if ($isExistingProfile -and -not $hasPlaceholders) {
 $whatIfStatus = 'Skipped'
 if (-not $SkipWhatIf -and -not $hasPlaceholders) {
     Write-Host "Running deployment what-if in $Location. This can take a few minutes..."
-    $whatIf = Invoke-Az -Arguments @('deployment', 'sub', 'what-if', '--location', $Location, '--parameters', $ParametersFile, '--result-format', 'ResourceIdOnly', '--no-pretty-print')
+    $whatIfArguments = @('deployment', 'sub', 'what-if', '--location', $Location, '--parameters', $ParametersFile)
+    if ($overrideArguments.Count -gt 0) {
+        $whatIfArguments += @('--parameters') + $overrideArguments
+    }
+    $whatIf = Invoke-Az -Arguments ($whatIfArguments + @('--result-format', 'ResourceIdOnly', '--no-pretty-print'))
     if ($whatIf.Succeeded -and (Get-Property $whatIf.Value 'status') -ne 'Failed') {
         $whatIfStatus = 'Succeeded'
         $statusByChange = @{
@@ -486,6 +517,9 @@ Write-Host "Subscription : $($account.Value.name) ($subscriptionId)"
 Write-Host "Tenant       : $($account.Value.tenantId)"
 Write-Host "Profile      : $profileName"
 Write-Host "Regions      : $primaryLocation (primary) -> $secondaryLocation (secondary)"
+if ($overrideArguments.Count -gt 0) {
+    Write-Host "Overrides    : $($overrideArguments -join ', ')"
+}
 
 Write-Host ''
 Write-Host 'Prerequisites' -ForegroundColor Cyan
@@ -517,16 +551,17 @@ if ($summary.PrerequisitesActionRequired -gt 0) {
 
 if ($OutputPath) {
     [pscustomobject]@{
-        GeneratedAt       = (Get-Date).ToUniversalTime().ToString('o')
-        SubscriptionId    = $subscriptionId
-        TenantId          = $account.Value.tenantId
-        Profile           = $profileName
-        ParametersFile    = $ParametersFile
-        PrimaryLocation   = $primaryLocation
-        SecondaryLocation = $secondaryLocation
-        Summary           = $summary
-        Prerequisites     = $prerequisites
-        Resources         = $resources
+        GeneratedAt        = (Get-Date).ToUniversalTime().ToString('o')
+        SubscriptionId     = $subscriptionId
+        TenantId           = $account.Value.tenantId
+        Profile            = $profileName
+        ParametersFile     = $ParametersFile
+        ParameterOverrides = @($overrideArguments)
+        PrimaryLocation    = $primaryLocation
+        SecondaryLocation  = $secondaryLocation
+        Summary            = $summary
+        Prerequisites      = $prerequisites
+        Resources          = $resources
     } | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $OutputPath -Encoding utf8
     Write-Host "Report written to $OutputPath"
 }

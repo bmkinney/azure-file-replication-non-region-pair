@@ -7,9 +7,11 @@ $inventoryScript = Join-Path $repositoryRoot 'scripts/inventory.ps1'
 $realAz = (Get-Command az -CommandType Application | Select-Object -First 1).Source
 $subscription = '/subscriptions/00000000-0000-0000-0000-000000000000'
 $fakeAzRules = @()
+$global:InventoryAzCalls = [System.Collections.Generic.List[string]]::new()
 
 function az {
     $joined = $args -join ' '
+    $global:InventoryAzCalls.Add($joined)
     if ($args[0] -eq 'bicep') {
         & $realAz @args
         return
@@ -28,14 +30,19 @@ function New-Rule([string]$Pattern, $Response) {
     [pscustomobject]@{ Pattern = $Pattern; Response = $Response }
 }
 
-function Invoke-Inventory([string]$ParametersFile) {
+function Invoke-Inventory([string]$ParametersFile, [string[]]$ParameterOverrides = @()) {
     $reportPath = Join-Path ([IO.Path]::GetTempPath()) "inventory-report-$([guid]::NewGuid().ToString('N')).json"
+    $global:InventoryAzCalls.Clear()
     try {
-        & $inventoryScript -ParametersFile $ParametersFile -OutputPath $reportPath 6> $null
+        & $inventoryScript -ParametersFile $ParametersFile -OutputPath $reportPath -ParameterOverrides $ParameterOverrides 6> $null
         return Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json -Depth 20
     } finally {
         Remove-Item -LiteralPath $reportPath -Force -ErrorAction SilentlyContinue
     }
+}
+
+function Get-WhatIfCall {
+    return @($global:InventoryAzCalls | Where-Object { $_ -like 'deployment sub what-if*' }) | Select-Object -First 1
 }
 
 function Assert-True([bool]$Condition, [string]$Message) {
@@ -76,6 +83,21 @@ Assert-True ((Get-Status $report 'Standard_ZRS in southcentralus') -contains 'Re
 Assert-True ((Get-Status $report 'alertEmailAddresses') -contains 'Warning') 'the example alert address was not flagged'
 $roleAssignment = @($report.Resources | Where-Object Type -eq 'Microsoft.Authorization/roleAssignments')
 Assert-True ($roleAssignment.Count -eq 1 -and $roleAssignment[0].Name -eq 'role-1 on stfileprimary') 'role assignment scope was not described'
+Assert-True ((Get-WhatIfCall) -notlike '*--parameters activeRegion*') 'what-if must not add parameters when no overrides are given'
+
+# Overrides reach what-if as extra --parameters values; names the template doesn't declare are dropped.
+$report = Invoke-Inventory (Join-Path $repositoryRoot 'infra/main.bicepparam') @('activeRegion=primary', 'acrPublicNetworkAccess=Disabled', 'notDeclared=1')
+$whatIfCall = Get-WhatIfCall
+Assert-True ($whatIfCall -like '*--parameters activeRegion=primary acrPublicNetworkAccess=Disabled --result-format*') "what-if did not receive the overrides: $whatIfCall"
+Assert-True ($whatIfCall -notlike '*notDeclared*') 'an undeclared override was passed to what-if'
+Assert-True ((@($report.ParameterOverrides) -join ',') -eq 'activeRegion=primary,acrPublicNetworkAccess=Disabled') "report overrides were $(@($report.ParameterOverrides) -join ',')"
+$invalidOverrideRejected = $false
+try {
+    Invoke-Inventory (Join-Path $repositoryRoot 'infra/main.bicepparam') @('activeRegion') | Out-Null
+} catch {
+    $invalidOverrideRejected = $_.Exception.Message -match 'name=value'
+}
+Assert-True $invalidOverrideRejected 'an override without a value was accepted'
 
 # Existing resources: copy the templates so the test parameter file can reference them.
 $workRoot = Join-Path ([IO.Path]::GetTempPath()) "inventory-test-$([guid]::NewGuid().ToString('N'))"
@@ -177,6 +199,19 @@ try {
     $report = Invoke-Inventory $parametersFile
     Assert-True ((Get-Status $report 'primary job copy path*') -contains 'Action required') 'a hub-only primary copy path was accepted'
     Assert-True ((Get-Status $report 'secondary job copy path*') -contains 'Action required') 'a hub-only secondary copy path was accepted'
+
+    # A placeholder that an override replaces no longer blocks lookups and what-if.
+    $placeholderFile = Join-Path $workRoot 'existing.placeholder.bicepparam'
+    (Get-Content -LiteralPath $parametersFile -Raw) -replace "param containerImage = '[^']+'", "param containerImage = '<existing-acr-login-server>/<repository>@sha256:<digest>'" | Set-Content -LiteralPath $placeholderFile -Encoding utf8
+    $fakeAzRules = $commonRules + (Get-ExistingRules -PrimaryEndpoints @('pe-primary-file-a', 'pe-primary-file-b') -SecondaryEndpoints @('pe-secondary-file-a', 'pe-secondary-file-b'))
+    $report = Invoke-Inventory $placeholderFile
+    Assert-True ((Get-Status $report 'existing.placeholder.bicepparam') -contains 'Action required') 'the placeholder image was not flagged without an override'
+    $report = Invoke-Inventory $placeholderFile @("containerImage=acrtest.azurecr.io/azure-files-dr-azcopy@sha256:$digest", 'activeRegion=primary', 'acrPublicNetworkAccess=Disabled')
+    Assert-True ((Get-Status $report 'existing.placeholder.bicepparam') -contains 'Ready') 'an overridden placeholder was still reported'
+    Assert-True ((Get-Status $report 'containerImage') -contains 'Ready') 'the override image was not checked'
+    $whatIfCall = Get-WhatIfCall
+    Assert-True ($whatIfCall -like "*--parameters containerImage=acrtest.azurecr.io/azure-files-dr-azcopy@sha256:$digest activeRegion=primary --result-format*") "what-if did not receive the existing-profile overrides: $whatIfCall"
+    Assert-True ($whatIfCall -notlike '*acrPublicNetworkAccess*') 'an override that existing.bicep does not declare was passed to what-if'
 } finally {
     Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
