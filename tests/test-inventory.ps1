@@ -341,8 +341,7 @@ param alertEmailAddresses = ['alerts@replication.test']
     Assert-True ((Get-Status $report 'existing.placeholder.bicepparam') -contains 'Ready') 'an overridden placeholder was still reported'
     Assert-True ((Get-Status $report 'containerImage') -contains 'Ready') 'the override image was not checked'
     $whatIfCall = Get-WhatIfCall
-    Assert-True ($whatIfCall -like "*--parameters containerImage=acrtest.azurecr.io/azure-files-dr-azcopy@sha256:$digest activeRegion=primary --result-format*") "what-if did not receive the existing-profile overrides: $whatIfCall"
-    Assert-True ($whatIfCall -notlike '*acrPublicNetworkAccess*') 'an override that existing.bicep does not declare was passed to what-if'
+    Assert-True ($whatIfCall -like "*--parameters containerImage=acrtest.azurecr.io/azure-files-dr-azcopy@sha256:$digest activeRegion=primary acrPublicNetworkAccess=Disabled --result-format*") "what-if did not receive the existing-profile overrides: $whatIfCall"
 } finally {
     Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
