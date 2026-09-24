@@ -109,7 +109,7 @@ pwsh ./scripts/inventory.ps1 -ParametersFile ./infra/existing.bicepparam -Output
 
 The report contains two tables:
 
-- **Prerequisites** lists placeholder parameters, resource provider registration, and Container Apps availability in both regions. For the greenfield profile, it also checks storage SKU availability. For the existing-resource profile, it checks the storage accounts and shares, the VNets and delegated subnets, the registry and digest-pinned image, the [server-side copy network layout](#network-requirements-for-server-side-copy), the private DNS records for the file endpoints, and registry reachability. Services set to `new` are reported as `To be created`, after the inventory checks their inputs: SKU availability, name availability, a free and non-overlapping subnet prefix, and the endpoint subnet and DNS zones for endpoints created in existing VNets. Each item is `Ready`, `To be created`, `Action required`, `Warning`, or `Not verified`.
+- **Prerequisites** lists placeholder parameters, resource provider registration, and Container Apps availability in both regions. For the greenfield profile, it also checks storage SKU availability. For the existing-resource profile, it checks the storage accounts and shares, the VNets and delegated subnets, the registry and digest-pinned image, the [server-side copy network layout](#network-requirements-for-server-side-copy), the private DNS records for the file endpoints, and registry reachability. Services set to `new` are reported as `To be created`, after the inventory checks their inputs: SKU availability, name availability, a free and non-overlapping subnet prefix, and the endpoint subnet and DNS zones for endpoints created in existing VNets. It also checks custom names against the naming rules of their resource types, and each resource group that the deployment places resources in against [`existingResourceGroups`](#choose-the-resource-groups). Each item is `Ready`, `To be created`, `Action required`, `Warning`, or `Not verified`.
 - **Template resources** lists every resource from `az deployment sub what-if` as `To be provisioned`, `Exists, will be redeployed`, or `Exists, not managed by this template`. The inventory requests resource IDs only, so it reports whether each resource exists but doesn't compare properties. To review property-level differences, run `az deployment sub what-if` with the same parameter file.
 
 Resource lookups need Reader access. What-if needs deployment permissions; use `-SkipWhatIf` to omit it. Resolve every `Action required` item before deploying.
@@ -169,6 +169,8 @@ For each service, the audit chooses as follows:
 
 For each reused VNet, the audit also lists in `primaryEndpointsToCreate` or `secondaryEndpointsToCreate` the reused services that have no endpoint there. When the deployment will create endpoints in the VNet, the audit fills in its endpoint subnet and the IDs of the private DNS zones linked to it. New VNets get address ranges that don't overlap any VNet in the subscription. The audit comments each choice in the file, checks that the file compiles, and refuses to overwrite an existing file without `-Force`. Keep the generated file out of source control: `infra/existing.bicepparam` and `infra/*.local.bicepparam` are git-ignored.
 
+The generated file places everything in `-ReplicationResourceGroupName`. Add `-SecondaryResourceGroupName` for one resource group per region. For each new service, the file includes empty name and resource group parameters, and it ends with a commented `resourceNames` block for the other resources. Fill in the values you want, as described in [Name new resources](#name-new-resources) and [Choose the resource groups](#choose-the-resource-groups). The audit lists the target resource groups that already exist in `existingResourceGroups`; update the list if you change the groups.
+
 ## RBAC requirements
 
 The templates create two user-assigned managed identities, one for each regional Container Apps Job, and create these assignments automatically:
@@ -182,7 +184,7 @@ The templates create two user-assigned managed identities, one for each regional
 
 Both identities need access to both file accounts because either region can become the replication source. Do not replace the Azure Files data role with a management-plane role such as Contributor; management-plane access does not authorize file data operations. Storage keys and SAS tokens are not used.
 
-The identity running the deployment must be able to create the subscription- and resource-group-scoped resources, attach the managed identities to the jobs, and create the role assignments above. The straightforward assignment is **Owner** at the subscription. A more separated configuration is **Contributor** plus **Role Based Access Control Administrator** at the subscription, or equivalent custom roles containing the required resource writes, `Microsoft.ManagedIdentity/userAssignedIdentities/assign/action`, and `Microsoft.Authorization/roleAssignments/write`. For the existing-resource profile, those permissions must include the workload resource group and each storage account and registry that it reuses. All reused resources must be in the deployment subscription; only the private DNS zones named by zone ID can be in another subscription. Creating services needs the [additional rights](#reuse-or-create-each-service) listed with the modes.
+The identity running the deployment must be able to create the subscription- and resource-group-scoped resources, attach the managed identities to the jobs, and create the role assignments above. The straightforward assignment is **Owner** at the subscription. A more separated configuration is **Contributor** plus **Role Based Access Control Administrator** at the subscription, or equivalent custom roles containing the required resource writes, `Microsoft.ManagedIdentity/userAssignedIdentities/assign/action`, and `Microsoft.Authorization/roleAssignments/write`. For the existing-resource profile, those permissions must include every resource group that the deployment places resources in, and each storage account and registry that it reuses. All reused resources must be in the deployment subscription; only the private DNS zones named by zone ID can be in another subscription. Creating services needs the [additional rights](#reuse-or-create-each-service) listed with the modes.
 
 When `scripts/deploy.ps1` builds the image instead of receiving `-ContainerImage`, the caller also needs permission to queue an ACR Task build and read the resulting manifest. For a non-ABAC registry, grant **AcrPush** on the registry in addition to the required management-plane access. Supplying a prebuilt digest-pinned image avoids this build-time permission.
 
@@ -213,7 +215,7 @@ A VNet can link only one private DNS zone with a given name. If workload VNets s
 
 ### Reuse or create each service
 
-Each service has a mode parameter. `existing` is the default, so parameter files written before the modes existed keep working. A new service needs no names; the deployment creates it in `resourceGroupName`. To choose a name instead, set the name parameter.
+Each service has a mode parameter. `existing` is the default, so parameter files written before the modes existed keep working. A new service needs no names or resource groups: the deployment generates the names and creates the service in its region's resource group. To choose either, see [Name new resources](#name-new-resources) and [Choose the resource groups](#choose-the-resource-groups).
 
 | Service | Mode parameters | `existing` | `new` |
 | --- | --- | --- | --- |
@@ -229,7 +231,7 @@ The deployment creates a private endpoint in each job VNet for:
 
 Endpoints between existing resources that aren't listed must already exist. Endpoints created in an existing VNet go in `primaryPrivateEndpointSubnetName` or `secondaryPrivateEndpointSubnetName`, and they register in the zones given by the `*FileDnsZoneId` and `*RegistryDnsZoneId` parameters. Leave a zone ID empty when Azure Policy or another process creates the records.
 
-A deployment that is missing a required input fails validation with a message that names the parameters, before any resource changes. Resources that the deployment creates are removed with `resourceGroupName` and the new DNS resource groups. A subnet added in `newSubnet` mode stays in its VNet: delete it after the environment, and add it to any other IaC that manages the VNet so that a later deployment doesn't remove it.
+A deployment that is missing a required input fails validation with a message that names the parameters, before any resource changes. To remove what the deployment created, delete the resource groups it created; the inventory lists them as `To be created` before the first deployment. Delete resources that it added to groups listed in `existingResourceGroups` individually. A subnet added in `newSubnet` mode stays in its VNet: delete it after the environment, and add it to any other IaC that manages the VNet so that a later deployment doesn't remove it.
 
 Creating services needs rights beyond the [RBAC requirements](#rbac-requirements):
 
@@ -237,6 +239,57 @@ Creating services needs rights beyond the [RBAC requirements](#rbac-requirements
 - `Microsoft.Network/virtualNetworks/subnets/write` on a VNet that gets a subnet.
 - Private DNS Zone Contributor on the zones that receive records.
 - Approval rights on existing storage accounts and registries that get new endpoints. Without approval rights, a new endpoint connection stays pending until the resource owner approves it.
+
+#### Name new resources
+
+Every resource that the deployment creates gets a generated name unless you set one. For a service in `new` mode, its name parameters name the new resource:
+
+| Service | Name parameters | Generated names |
+| --- | --- | --- |
+| Storage | `primaryStorageAccountName` and `primaryFileShareName`, and the `secondary` equivalents | `stfile<token>` and `replication` |
+| Network | `primaryVnetName`, `primaryInfrastructureSubnetName`, and `primaryPrivateEndpointSubnetName`, and the `secondary` equivalents | `vnet-replication-<region-code>` with subnets `jobs` and `endpoints`. A subnet added in `newSubnet` mode is named `snet-replication-jobs`. |
+| Registry | `registryName` | `acr<token>` |
+
+Name the other resources in the optional `resourceNames` object. Omitted keys keep their generated names, and an unknown key fails compilation:
+
+| Keys | Resources |
+| --- | --- |
+| `primaryIdentity`, `secondaryIdentity` | Job managed identities |
+| `primaryLogWorkspace`, `secondaryLogWorkspace` | Log Analytics workspaces |
+| `primaryEnvironment`, `secondaryEnvironment` | Container Apps environments |
+| `primaryJob`, `secondaryJob` | Container Apps jobs |
+| `primaryVnetPrimaryStorageEndpoint`, `primaryVnetSecondaryStorageEndpoint`, `primaryVnetRegistryEndpoint`, and the `secondaryVnet` equivalents | Private endpoints that the deployment creates in each job VNet |
+| `actionGroup`, `primaryFailureAlert`, `secondaryFailureAlert`, `primaryFreshnessAlert`, `secondaryFreshnessAlert` | Azure Monitor action group and alert rules |
+
+```bicep
+param resourceNames = {
+  primaryJob: 'job-files-eus2'
+  secondaryJob: 'job-files-wus2'
+  actionGroup: 'ag-files-replication'
+}
+```
+
+Storage account and registry names must be globally unique. The inventory checks each custom name against the naming rules of its resource type, and checks that new storage account and registry names are available. Set names before the first deployment: a later name change creates another resource and leaves the old one in place, and `scripts/switch-direction.ps1` refuses to run while more than two replication jobs exist.
+
+#### Choose the resource groups
+
+By default, everything that the deployment creates goes in `resourceGroupName`, except the private DNS zones of new VNets. Choose one of these layouts:
+
+| Layout | Parameters |
+| --- | --- |
+| Single resource group | `resourceGroupName` only. When both VNets are new, their DNS zones still need two other groups; see the placement rules below. |
+| One resource group per region | Also set `secondaryResourceGroupName` and `secondaryResourceGroupLocation`. Secondary-region compute and new secondary-region services go there. |
+| Per service | Also set the resource group parameter of each new service, such as `primaryStorageResourceGroupName`, `secondaryVnetResourceGroupName`, or `registryResourceGroupName`. Set `primaryEndpointResourceGroupName` or `secondaryEndpointResourceGroupName` for the private endpoints that the deployment creates in each job VNet. |
+
+The deployment places resources as follows:
+
+- Primary-region compute (the identity, Log Analytics workspace, Container Apps environment, and job) goes in `resourceGroupName`, together with the action group and all alert rules. Secondary-region compute goes in `secondaryResourceGroupName`, which defaults to `resourceGroupName`.
+- A new service goes in its resource group parameter when you set it, and otherwise in its region's group. The registry belongs to the primary region.
+- Private endpoints that the deployment creates go in the endpoint resource group parameter when you set it. Otherwise, they go in the group of a new VNet, or in the region's group for an existing VNet.
+- A new VNet's split-horizon DNS zones go in `primaryDnsResourceGroupName` or `secondaryDnsResourceGroupName`, which default to `<region-group>-<region-code>-dns`. A resource group can hold only one zone with a given name, so the two DNS resource groups must differ when both VNets are new. Use groups without other `privatelink` zones: the deployment takes over zones with the same names and links them to the new VNet, which changes name resolution for every VNet already linked to them.
+- Reused services, and subnets added in `newSubnet` mode, stay in their existing resource groups.
+
+The deployment creates each resource group that it places resources in, with the template's tags, except the groups listed in `existingResourceGroups`. List every target group that already exists: the deployment adds resources to a listed group without changing the group, but it replaces the tags of an existing group that isn't listed. The inventory reports an unlisted existing group as a warning, and a listed group that doesn't exist as `Action required`. One resource group per region, or per service, lets you grant access to, manage, or remove each part separately.
 
 ### Before you deploy
 
@@ -254,8 +307,8 @@ pwsh ./scripts/inventory.ps1 -ParametersFile ./infra/existing.bicepparam
 | Container Apps subnets | Dedicated, empty, and delegated to `Microsoft.App/environments` in each region. If job subnet traffic egresses through a firewall, allow the documented Container Apps outbound dependencies. |
 | File shares | SMB shares in classic `Microsoft.Storage` storage accounts. NFS shares and `Microsoft.FileShares` resources aren't supported. The destination share is empty or disposable and has quota for the source data plus growth, because deletions aren't replicated. |
 | Registry | Reachable from both job subnets. If the registry uses ABAC repository permissions, `AcrPull` isn't honored; assign **Container Registry Repository Reader** to both job identities instead. |
-| Subscription and rights | All referenced resources are in the deployment subscription. The deploying identity can create resources and role assignments in the replication resource group, and can assign roles on both storage accounts and the registry. |
-| Parameter file | Keep the default `tags`, or include `Workload: 'azure-files-dr-replication'`, because `scripts/switch-direction.ps1` finds the jobs by that tag. `existingPrivateEndpointIds` is recorded for reference only; the template doesn't validate endpoint approval or DNS. Each service's mode matches your intent: `existing` services must already meet the checks above, and `new` services are created. |
+| Subscription and rights | All referenced resources are in the deployment subscription. The deploying identity can create resources and role assignments in the replication resource groups, and can assign roles on both storage accounts and the registry. |
+| Parameter file | Keep the default `tags`, or include `Workload: 'azure-files-dr-replication'`, because `scripts/switch-direction.ps1` finds the jobs by that tag. `existingPrivateEndpointIds` is recorded for reference only; the template doesn't validate endpoint approval or DNS. Each service's mode matches your intent: `existing` services must already meet the checks above, and `new` services are created. `existingResourceGroups` lists every target resource group that already exists. |
 
 ### Put the AzCopy image in the registry
 
@@ -300,7 +353,7 @@ Create a local parameter file that Git ignores, either from the example or with 
 cp infra/existing.example.bicepparam infra/existing.bicepparam
 ```
 
-Edit every placeholder in `infra/existing.bicepparam`, set a [mode](#reuse-or-create-each-service) for each service, and keep `activeRegion = 'none'` for the first deployment so both jobs are created without a schedule. Set `alertEmailAddresses` to one or more monitored operations addresses. The deployment creates an Azure Monitor Action Group and enables Common Alert Schema for every receiver. Supported `replicationLagThresholdMinutes` values are `20`, `30`, and `60`; the default is `30`.
+Edit every placeholder in `infra/existing.bicepparam`, set a [mode](#reuse-or-create-each-service) for each service, optionally choose [names](#name-new-resources) and [resource groups](#choose-the-resource-groups) for what the deployment creates, and keep `activeRegion = 'none'` for the first deployment so both jobs are created without a schedule. Set `alertEmailAddresses` to one or more monitored operations addresses. The deployment creates an Azure Monitor Action Group and enables Common Alert Schema for every receiver. Supported `replicationLagThresholdMinutes` values are `20`, `30`, and `60`; the default is `30`.
 
 Validate, preview, and deploy:
 
@@ -348,10 +401,10 @@ pwsh ./scripts/deploy.ps1 `
 
 2. From a client in the secondary region that mounts the destination share, such as a VM or Kubernetes pod, compare file counts and confirm that modification times match the source.
 
-3. Test the standby job with a dry run. A dry run checks the image pull, managed identity, DNS, private endpoints, and read access to both shares without writing data. Export the job's template:
+3. Test the standby job with a dry run. A dry run checks the image pull, managed identity, DNS, private endpoints, and read access to both shares without writing data. The secondary job is in `secondaryResourceGroupName`, which defaults to the replication resource group. Export the job's template:
 
    ```bash
-   az containerapp job show --name <secondary-job> --resource-group <replication-resource-group> \
+   az containerapp job show --name <secondary-job> --resource-group <secondary-resource-group> \
        --query properties.template --output yaml > standby-dry-run.yaml
    ```
 
@@ -363,7 +416,7 @@ pwsh ./scripts/deploy.ps1 `
    ```
 
    ```bash
-   az containerapp job start --name <secondary-job> --resource-group <replication-resource-group> \
+   az containerapp job start --name <secondary-job> --resource-group <secondary-resource-group> \
        --yaml standby-dry-run.yaml
    ```
 
@@ -506,18 +559,19 @@ pwsh ./scripts/switch-direction.ps1 -ActiveRegion secondary -WritesFenced
 pwsh ./scripts/switch-direction.ps1 -ActiveRegion primary -WritesFenced
 ```
 
-For the existing-resource profile, also identify the replication resource group and parameter file:
+For the existing-resource profile, also identify the replication resource groups and parameter file. Pass `-SecondaryResourceGroupName` when you set `secondaryResourceGroupName`:
 
 ```powershell
 pwsh ./scripts/switch-direction.ps1 `
 	-ActiveRegion secondary `
 	-WritesFenced `
 	-ResourceGroupName '<replication-resource-group>' `
+	-SecondaryResourceGroupName '<secondary-resource-group>' `
 	-Location '<primary-region>' `
 	-ParametersFile ./infra/existing.bicepparam
 ```
 
-The switch script refuses to proceed while either job is running or when the deployed images differ or are not digest-pinned.
+The switch script refuses to proceed if it doesn't find exactly two replication jobs, if either job is running, or if the deployed images differ or aren't digest-pinned.
 
 The first run in the new direction copies only files whose SMB last-write time is newer than the destination copy, plus folder properties. Files that were replicated unchanged aren't recopied, because the wrapper preserves SMB timestamps and sync compares them. If both shares received writes to the same file, sync keeps the copy with the newer last-write time, so reconcile conflicting writes before releasing the fence.
 

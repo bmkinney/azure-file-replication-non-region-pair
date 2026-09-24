@@ -15,7 +15,9 @@ function Resolve-TemplateValue($Template, $Value) {
     return $Value
 }
 
-foreach ($moduleName in 'foundation.bicep', 'existing-foundation.bicep') {
+# The greenfield foundation declares both regions; the existing-resource profile deploys one region module per region.
+$expectedCounts = [ordered]@{ 'foundation.bicep' = 2; 'replication-region.bicep' = 1 }
+foreach ($moduleName in $expectedCounts.Keys) {
     $modulePath = Join-Path $PSScriptRoot "../infra/modules/$moduleName"
     $compiledJson = (& az bicep build --file $modulePath --stdout) -join [Environment]::NewLine
     if ($LASTEXITCODE -ne 0) {
@@ -25,10 +27,11 @@ foreach ($moduleName in 'foundation.bicep', 'existing-foundation.bicep') {
     # languageVersion 2.0 templates use a resource dictionary instead of an array.
     $resources = if ($template.resources -is [array]) { $template.resources } else { @($template.resources.PSObject.Properties.Value) }
 
+    $expected = $expectedCounts[$moduleName]
     $environments = @($resources | Where-Object { $_.type -eq 'Microsoft.App/managedEnvironments' -and -not $_.existing })
     $jobs = @($resources | Where-Object { $_.type -eq 'Microsoft.App/jobs' })
-    Assert-True ($environments.Count -eq 2) "$moduleName declares $($environments.Count) Container Apps environments; expected 2"
-    Assert-True ($jobs.Count -eq 2) "$moduleName declares $($jobs.Count) Container Apps jobs; expected 2"
+    Assert-True ($environments.Count -eq $expected) "$moduleName declares $($environments.Count) Container Apps environments; expected $expected"
+    Assert-True ($jobs.Count -eq $expected) "$moduleName declares $($jobs.Count) Container Apps jobs; expected $expected"
 
     # Delegated subnets require a workload profiles environment, so the profile must be explicit rather than an RP default.
     $profileNames = @()

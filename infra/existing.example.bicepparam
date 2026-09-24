@@ -10,8 +10,17 @@ param primaryRegionCode = 'pri'
 param secondaryRegionCode = 'sec'
 param environmentName = 'prod'
 
+// Optional: one resource group per region. Secondary-region compute and new secondary-region services go here.
+// param secondaryResourceGroupName = '<secondary-replication-resource-group>'
+// param secondaryResourceGroupLocation = '<secondary-region>'
+
+// The deployment creates every resource group it places resources in, except the groups listed here, which it
+// leaves unchanged. List each target group that already exists, or the deployment replaces its tags:
+// param existingResourceGroups = ['<replication-resource-group>']
+
 // Each service is reused (existing, the default) or created by the deployment (new).
-// A new service needs no names: the deployment creates it in resourceGroupName with its endpoints and DNS records.
+// For a new service, the name and resource group parameters are optional: they name the new resource and choose its
+// resource group, which defaults to its region's group. The deployment also creates its endpoints and DNS records.
 param primaryStorageMode = 'existing'
 param primaryStorageAccountName = '<primary-storage-account>'
 param primaryStorageResourceGroupName = '<primary-storage-resource-group>'
@@ -20,7 +29,8 @@ param secondaryStorageMode = 'existing'
 param secondaryStorageAccountName = '<secondary-storage-account>'
 param secondaryStorageResourceGroupName = '<secondary-storage-resource-group>'
 param secondaryFileShareName = '<secondary-file-share>'
-// For a new account: param secondaryStorageMode = 'new', optionally with secondaryStorageSkuName and secondaryFileShareName.
+// For a new account: param secondaryStorageMode = 'new', optionally with secondaryStorageAccountName,
+// secondaryStorageResourceGroupName, secondaryStorageSkuName, and secondaryFileShareName.
 
 // Network modes: existing reuses a VNet and its empty delegated subnet; newSubnet adds a delegated subnet to the VNet
 // (set primaryInfrastructureSubnetPrefix); new creates a dedicated VNet (primaryVnetAddressPrefix) with its own DNS zones.
@@ -45,6 +55,15 @@ param registryMode = 'existing'
 param registryName = '<existing-premium-acr>'
 param registryResourceGroupName = '<acr-resource-group>'
 // For a Basic or Standard registry that the jobs reach publicly: param registryPrivateEndpointsEnabled = false
+
+// Optional names for the other resources the deployment creates; omitted names are generated. Valid keys are
+// primaryIdentity, primaryLogWorkspace, primaryEnvironment, primaryJob, the secondary equivalents,
+// primaryVnetPrimaryStorageEndpoint, primaryVnetSecondaryStorageEndpoint, primaryVnetRegistryEndpoint, the secondaryVnet
+// equivalents, actionGroup, primaryFailureAlert, secondaryFailureAlert, primaryFreshnessAlert, and secondaryFreshnessAlert.
+// param resourceNames = {
+//   primaryJob: '<primary-job-name>'
+//   secondaryJob: '<secondary-job-name>'
+// }
 
 // Reference only: list the existing private endpoints your replication network layout uses.
 // This example shows the local-endpoint layout; the template does not validate these IDs.

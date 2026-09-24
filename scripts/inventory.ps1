@@ -144,7 +144,9 @@ if (-not $Location) {
 
 $placeholders = @($suppliedParameters.PSObject.Properties | Where-Object {
     $value = Get-Property $_.Value 'value'
-    @($value) | Where-Object { $_ -is [string] -and $_ -match '<[^>]+>' }
+    # Object parameters such as resourceNames are checked one level deep.
+    $values = @($value) + @(@($value) | Where-Object { $_ -is [System.Management.Automation.PSCustomObject] } | ForEach-Object { $_.PSObject.Properties } | ForEach-Object { $_.Value })
+    $values | Where-Object { $_ -is [string] -and $_ -match '<[^>]+>' }
 } | ForEach-Object { $_.Name })
 $hasPlaceholders = $placeholders.Count -gt 0
 if ($hasPlaceholders) {
@@ -316,6 +318,135 @@ if ($isExistingProfile -and -not $hasPlaceholders) {
         }
     }
 
+    # Mirrors the placement rules in existing.bicep: a resource goes to its own resource group parameter, or else to its region's group.
+    $secondaryGroup = [string](Get-ParameterValue 'secondaryResourceGroupName')
+    if (-not $secondaryGroup) {
+        $secondaryGroup = $workloadGroup
+    }
+    $regionGroups = @{ primary = $workloadGroup; secondary = $secondaryGroup }
+    $placement = @{}
+    foreach ($role in 'primary', 'secondary') {
+        $regionGroup = $regionGroups[$role]
+        $storageGroup = [string](Get-ParameterValue "${role}StorageResourceGroupName")
+        $vnetGroup = [string](Get-ParameterValue "${role}VnetResourceGroupName")
+        $endpointGroup = [string](Get-ParameterValue "${role}EndpointResourceGroupName")
+        $dnsGroup = [string](Get-ParameterValue "${role}DnsResourceGroupName")
+        $newVnetGroup = if ($vnetGroup) { $vnetGroup } else { $regionGroup }
+        $placement[$role] = @{
+            Storage  = if ($storageGroup) { $storageGroup } else { $regionGroup }
+            Vnet     = $newVnetGroup
+            Endpoint = if ($endpointGroup) { $endpointGroup } elseif ($networkModes[$role] -eq 'new') { $newVnetGroup } else { $regionGroup }
+            Dns      = if ($dnsGroup) { $dnsGroup } else { "$regionGroup-$(Get-ParameterValue "${role}RegionCode")-dns" }
+        }
+    }
+    $registryPlacement = [string](Get-ParameterValue 'registryResourceGroupName')
+    if (-not $registryPlacement) {
+        $registryPlacement = $workloadGroup
+    }
+
+    if ((ConvertTo-Key (Get-ParameterValue 'primaryRegionCode')) -eq (ConvertTo-Key (Get-ParameterValue 'secondaryRegionCode'))) {
+        Add-Prerequisite -Area 'Parameters' -Item 'Region codes' -Status 'Action required' -Detail 'primaryRegionCode and secondaryRegionCode must differ because they distinguish the regional resource names.'
+    }
+    if ($networkModes['primary'] -eq 'new' -and $networkModes['secondary'] -eq 'new' -and (ConvertTo-Key $placement['primary'].Dns) -eq (ConvertTo-Key $placement['secondary'].Dns)) {
+        Add-Prerequisite -Area 'Resource group' -Item "DNS resource group $($placement['primary'].Dns)" -Status 'Action required' -Detail 'Both new VNets need their own private DNS zones, which have the same names, so primaryDnsResourceGroupName and secondaryDnsResourceGroupName must differ.'
+    }
+
+    $groupPlan = @(
+        @{ Name = $placement['primary'].Dns; Used = $networkModes['primary'] -eq 'new'; Purpose = 'primary private DNS zones' },
+        @{ Name = $placement['secondary'].Dns; Used = $networkModes['secondary'] -eq 'new'; Purpose = 'secondary private DNS zones' },
+        @{ Name = $placement['primary'].Endpoint; Used = $plans['primary'].primary -or $plans['primary'].secondary -or $plans['primary'].registry; Purpose = 'primary VNet private endpoints' },
+        @{ Name = $placement['secondary'].Endpoint; Used = $plans['secondary'].primary -or $plans['secondary'].secondary -or $plans['secondary'].registry; Purpose = 'secondary VNet private endpoints' },
+        @{ Name = $registryPlacement; Used = $registryMode -eq 'new'; Purpose = 'new registry' },
+        @{ Name = $placement['primary'].Vnet; Used = $networkModes['primary'] -eq 'new'; Purpose = 'new primary VNet' },
+        @{ Name = $placement['secondary'].Vnet; Used = $networkModes['secondary'] -eq 'new'; Purpose = 'new secondary VNet' },
+        @{ Name = $placement['primary'].Storage; Used = $storageModes['primary'] -eq 'new'; Purpose = 'new primary storage' },
+        @{ Name = $placement['secondary'].Storage; Used = $storageModes['secondary'] -eq 'new'; Purpose = 'new secondary storage' },
+        @{ Name = $secondaryGroup; Used = $true; Purpose = 'secondary-region compute' },
+        @{ Name = $workloadGroup; Used = $true; Purpose = 'primary-region compute and monitoring' }
+    )
+    $existingGroups = @(Get-ParameterValue 'existingResourceGroups' | Where-Object { $_ } | ForEach-Object { ConvertTo-Key $_ })
+    $targetGroups = [ordered]@{}
+    foreach ($entry in $groupPlan | Where-Object { $_.Used -and $_.Name }) {
+        $key = ConvertTo-Key $entry.Name
+        if (-not $targetGroups.Contains($key)) {
+            $targetGroups[$key] = [pscustomobject]@{ Name = $entry.Name; Purposes = [System.Collections.Generic.List[string]]::new() }
+        }
+        $targetGroups[$key].Purposes.Add($entry.Purpose)
+    }
+    foreach ($target in $targetGroups.Values) {
+        $item = "Resource group $($target.Name)"
+        $purposes = ($target.Purposes | Select-Object -Unique) -join ', '
+        $listed = $existingGroups -contains (ConvertTo-Key $target.Name)
+        $group = Invoke-Az -Arguments @('group', 'show', '--name', $target.Name)
+        if ($group.Succeeded) {
+            if ($listed) {
+                Add-Prerequisite -Area 'Resource group' -Item $item -Status 'Ready' -Detail "Exists and is listed in existingResourceGroups, so the deployment adds the $purposes without modifying it."
+            } elseif ((Get-Property $group.Value 'tags.Workload') -eq 'azure-files-dr-replication') {
+                Add-Prerequisite -Area 'Resource group' -Item $item -Status 'Ready' -Detail "Created by an earlier deployment of this template; holds the $purposes."
+            } else {
+                Add-Prerequisite -Area 'Resource group' -Item $item -Status 'Warning' -Detail "Exists but isn't listed in existingResourceGroups, so the deployment would replace its tags. List it to leave the group unchanged. Holds the $purposes."
+            }
+        } elseif ($group.NotFound) {
+            if ($listed) {
+                Add-Prerequisite -Area 'Resource group' -Item $item -Status 'Action required' -Detail 'Listed in existingResourceGroups but not found. Create it, or remove it from the list so that the deployment creates it.'
+            } else {
+                Add-Prerequisite -Area 'Resource group' -Item $item -Status 'To be created' -Detail "The deployment creates it for the $purposes."
+            }
+        } else {
+            Add-Prerequisite -Area 'Resource group' -Item $item -Status 'Not verified' -Detail $group.Error
+        }
+    }
+
+    # Names the deployment will use for new resources must meet each resource type's rules.
+    $nameRules = @{
+        storageAccount  = @{ Pattern = '^[a-z0-9]{3,24}$'; Text = '3 to 24 lowercase letters and digits' }
+        fileShare       = @{ Pattern = '^(?!.*--)[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$'; Text = '3 to 63 lowercase letters, digits, and single hyphens, starting and ending with a letter or digit' }
+        registry        = @{ Pattern = '^[a-zA-Z0-9]{5,50}$'; Text = '5 to 50 letters and digits' }
+        network         = @{ Pattern = '^[a-zA-Z0-9]([a-zA-Z0-9._-]{0,62}[a-zA-Z0-9_])?$'; Text = 'up to 64 letters, digits, periods, hyphens, and underscores, starting with a letter or digit and ending with a letter, digit, or underscore' }
+        job             = @{ Pattern = '^(?!.*--)[a-z][a-z0-9-]{0,30}[a-z0-9]$'; Text = '2 to 32 lowercase letters, digits, and single hyphens, starting with a letter and ending with a letter or digit' }
+        environment     = @{ Pattern = '^(?!.*--)[a-z][a-z0-9-]{0,58}[a-z0-9]$'; Text = '2 to 60 lowercase letters, digits, and single hyphens, starting with a letter and ending with a letter or digit' }
+        identity        = @{ Pattern = '^[a-zA-Z0-9][a-zA-Z0-9_-]{2,127}$'; Text = '3 to 128 letters, digits, hyphens, and underscores, starting with a letter or digit' }
+        logWorkspace    = @{ Pattern = '^[a-zA-Z0-9][a-zA-Z0-9-]{2,61}[a-zA-Z0-9]$'; Text = '4 to 63 letters, digits, and hyphens, starting and ending with a letter or digit' }
+        monitoring      = @{ Pattern = '^[^*#&+:<>?@%{}\\/]{0,259}[^*#&+:<>?@%{}\\/. ]$'; Text = 'up to 260 characters, without * # & + : < > ? @ % { } \ /, and not ending with a period or space' }
+    }
+    $customNames = [System.Collections.Generic.List[object]]::new()
+    foreach ($role in 'primary', 'secondary') {
+        if ($storageModes[$role] -eq 'new') {
+            $customNames.Add(@{ Parameter = "${role}StorageAccountName"; Value = Get-ParameterValue "${role}StorageAccountName"; Rule = 'storageAccount' })
+            $customNames.Add(@{ Parameter = "${role}FileShareName"; Value = Get-ParameterValue "${role}FileShareName"; Rule = 'fileShare' })
+        }
+        if ($networkModes[$role] -eq 'new') {
+            $customNames.Add(@{ Parameter = "${role}VnetName"; Value = Get-ParameterValue "${role}VnetName"; Rule = 'network' })
+            $customNames.Add(@{ Parameter = "${role}PrivateEndpointSubnetName"; Value = Get-ParameterValue "${role}PrivateEndpointSubnetName"; Rule = 'network' })
+        }
+        if ($networkModes[$role] -ne 'existing') {
+            $customNames.Add(@{ Parameter = "${role}InfrastructureSubnetName"; Value = Get-ParameterValue "${role}InfrastructureSubnetName"; Rule = 'network' })
+        }
+    }
+    if ($registryMode -eq 'new') {
+        $customNames.Add(@{ Parameter = 'registryName'; Value = Get-ParameterValue 'registryName'; Rule = 'registry' })
+    }
+    $resourceNames = Get-ParameterValue 'resourceNames'
+    foreach ($property in @($(if ($resourceNames) { $resourceNames.PSObject.Properties }))) {
+        $rule = switch -Regex ($property.Name) {
+            'Identity$' { 'identity' }
+            'LogWorkspace$' { 'logWorkspace' }
+            'Environment$' { 'environment' }
+            'Job$' { 'job' }
+            'Endpoint$' { 'network' }
+            default { 'monitoring' }
+        }
+        $customNames.Add(@{ Parameter = "resourceNames.$($property.Name)"; Value = $property.Value; Rule = $rule })
+    }
+    $checkedNames = @($customNames | Where-Object { $_.Value })
+    $invalidNames = @($checkedNames | Where-Object { [string]$_.Value -cnotmatch $nameRules[$_.Rule].Pattern })
+    foreach ($name in $invalidNames) {
+        Add-Prerequisite -Area 'Names' -Item "$($name.Parameter) '$($name.Value)'" -Status 'Action required' -Detail "Use $($nameRules[$name.Rule].Text)."
+    }
+    if ($checkedNames.Count -gt 0 -and $invalidNames.Count -eq 0) {
+        Add-Prerequisite -Area 'Names' -Item 'Custom names' -Status 'Ready' -Detail "$($checkedNames.Count) custom name(s) follow the naming rules of their resource types."
+    }
+
     $allVnets = $null
     $sides = @{}
     foreach ($role in 'primary', 'secondary') {
@@ -333,10 +464,10 @@ if ($isExistingProfile -and -not $hasPlaceholders) {
             }
             $kind = if ($skuName -like 'Premium*') { 'FileStorage' } else { 'StorageV2' }
             $side.AccountName = if ($accountName) { $accountName } else { "new $role account" }
-            $newDetail = "The deployment creates a $kind $skuName account$(if ($accountName) { " named $accountName" } else { ' with a generated name' }) and SMB share $shareName in $workloadGroup."
+            $newDetail = "The deployment creates a $kind $skuName account$(if ($accountName) { " named $accountName" } else { ' with a generated name' }) and SMB share $shareName in $($placement[$role].Storage)."
             $item = "$role account $(if ($accountName) { $accountName } else { '(new)' })"
             if ($accountName) {
-                $created = Invoke-Az -Arguments @('storage', 'account', 'show', '--name', $accountName, '--resource-group', $workloadGroup)
+                $created = Invoke-Az -Arguments @('storage', 'account', 'show', '--name', $accountName, '--resource-group', $placement[$role].Storage)
                 if ($created.Succeeded) {
                     Add-Prerequisite -Area 'Storage' -Item $item -Status 'Ready' -Detail 'Created by an earlier deployment of this template.'
                 } else {
@@ -394,16 +525,21 @@ if ($isExistingProfile -and -not $hasPlaceholders) {
         if ($side.NetworkMode -eq 'new') {
             $prefix = [string](Get-ParameterValue "${role}VnetAddressPrefix")
             $range = ConvertTo-CidrRange $prefix
-            $dnsGroup = Get-ParameterValue "${role}DnsResourceGroupName"
-            if (-not $dnsGroup) {
-                $dnsGroup = "$workloadGroup-$regionCode-dns"
-            }
+            $dnsGroup = $placement[$role].Dns
+
             $newVnetName = if ($vnetName) { $vnetName } else { "vnet-replication-$regionCode" }
             $item = "$role VNet $newVnetName (new)"
             if (-not $range -or $range.Length -gt 22) {
                 Add-Prerequisite -Area 'Network' -Item $item -Status 'Action required' -Detail "${role}VnetAddressPrefix '$prefix' must be an IPv4 range of /22 or larger."
             } else {
-                Add-Prerequisite -Area 'Network' -Item $item -Status 'To be created' -Detail "The deployment creates $newVnetName ($prefix) in $workloadGroup with a delegated /23 job subnet, an endpoint subnet, private endpoints for the storage accounts and registry, and private DNS zones in $dnsGroup."
+                Add-Prerequisite -Area 'Network' -Item $item -Status 'To be created' -Detail "The deployment creates $newVnetName ($prefix) in $($placement[$role].Vnet) with a delegated /23 job subnet, an endpoint subnet, private endpoints for the storage accounts and registry in $($placement[$role].Endpoint), and private DNS zones in $dnsGroup."
+                $zonesInGroup = Invoke-Az -Arguments @('network', 'private-dns', 'zone', 'list', '--resource-group', $dnsGroup)
+                if ($zonesInGroup.Succeeded) {
+                    $foreignZones = @($zonesInGroup.Value | Where-Object { (Get-Property $_ 'name') -like 'privatelink.*' -and (Get-Property $_ 'tags.Workload') -ne 'azure-files-dr-replication' } | ForEach-Object { Get-Property $_ 'name' })
+                    if ($foreignZones.Count -gt 0) {
+                        Add-Prerequisite -Area 'Network' -Item "$role DNS resource group $dnsGroup" -Status 'Warning' -Detail "Already holds $($foreignZones -join ', '). The deployment links the new VNet to those zones and adds its endpoint records, which also changes name resolution in every VNet already linked to them. Use a dedicated resource group for split-horizon zones."
+                    }
+                }
                 if ($null -eq $allVnets) {
                     $allVnets = @((Invoke-Az -Arguments @('network', 'vnet', 'list')).Value | Where-Object { $_ })
                 }
@@ -552,7 +688,7 @@ if ($isExistingProfile -and -not $hasPlaceholders) {
         $item = "Registry $(if ($registryName) { $registryName } else { '(new)' })"
         $newDetail = "The deployment creates a Premium registry$(if ($registryName) { " named $registryName" } else { ' with a generated name' }) in $primaryLocation with a replica in $secondaryLocation. scripts/deploy.ps1 builds the AzCopy image into it."
         if ($registryName) {
-            $created = Invoke-Az -Arguments @('acr', 'show', '--name', $registryName, '--resource-group', $workloadGroup)
+            $created = Invoke-Az -Arguments @('acr', 'show', '--name', $registryName, '--resource-group', $registryPlacement)
             if ($created.Succeeded) {
                 Add-Prerequisite -Area 'Registry' -Item $item -Status 'Ready' -Detail 'Created by an earlier deployment of this template.'
             } else {

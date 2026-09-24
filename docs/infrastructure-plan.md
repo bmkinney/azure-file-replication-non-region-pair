@@ -6,7 +6,7 @@ Deploy private, active/passive Azure Files replication across two selected Azure
 
 ## Topology
 
-- One workload resource group for replication compute and supporting resources.
+- One workload resource group for replication compute and supporting resources. The existing-resource profile can also use one resource group per region or per service.
 - One split-horizon Private DNS resource group per region in the greenfield profile.
 - One VNet per region with a delegated `default` subnet and a `storage` private endpoint subnet.
 - No VNet peering.
@@ -19,7 +19,7 @@ Deploy private, active/passive Azure Files replication across two selected Azure
 - Regional Log Analytics workspaces.
 - One shared Azure Monitor email Action Group, two job-failure metric alerts, and one freshness query alert per regional workspace.
 
-The existing-resource profile keeps this topology but reuses what already exists. For each storage account and share, regional network, and the registry, a mode parameter either reuses the service or creates it as the greenfield profile would. A new VNet gets its own split-horizon zones. `newSubnet` adds only a delegated job subnet to an existing VNet. Private endpoints are created for every new service and in every new VNet, which keeps the local-endpoint layout below for them. See the [README](../README.md#reuse-or-create-each-service).
+The existing-resource profile keeps this topology but reuses what already exists. For each storage account and share, regional network, and the registry, a mode parameter either reuses the service or creates it as the greenfield profile would. A new VNet gets its own split-horizon zones. `newSubnet` adds only a delegated job subnet to an existing VNet. Private endpoints are created for every new service and in every new VNet, which keeps the local-endpoint layout below for them. Every resource that the deployment creates can take a custom name, and it can go in one resource group, one per region, or one per service. See the [README](../README.md#reuse-or-create-each-service).
 
 ### Server-side copy requirement
 
@@ -64,9 +64,9 @@ At minimum, an equivalent custom deployment role must allow:
 - `Microsoft.Authorization/roleAssignments/write` and `Microsoft.Authorization/roleAssignments/delete` at each storage-account and ACR scope; and
 - read access to every existing resource referenced by the brownfield profile.
 
-The existing-resource profile also executes nested deployments in the resource groups containing the reused storage accounts and ACR, and in the resource group of a VNet that gets a new job subnet. The deployment principal therefore needs resource-group deployment permission in those resource groups and role-assignment permission on the target resources. The current template accepts resource-group names but not subscription IDs, so the workload and every reused storage account, network resource, private endpoint, and ACR must be in the same subscription. Private DNS zones named by resource ID can be in another subscription.
+The existing-resource profile also executes nested deployments in the resource groups containing the reused storage accounts and ACR, in the resource group of a VNet that gets a new job subnet, and in every resource group that receives resources it creates. The deployment principal therefore needs resource-group deployment permission in those resource groups and role-assignment permission on the target resources. The current template accepts resource-group names but not subscription IDs, so the workload and every reused storage account, network resource, private endpoint, and ACR must be in the same subscription. Private DNS zones named by resource ID can be in another subscription.
 
-When the existing-resource profile creates services, it places them, and every private endpoint it creates, in the workload resource group. A new VNet's split-horizon zones go in their own DNS resource groups. The principal also needs:
+When the existing-resource profile creates services, it places each one in its own resource group parameter or else in its region's resource group, and it places the private endpoints it creates in the endpoint resource group of their VNet. A new VNet's split-horizon zones go in their own DNS resource groups. The deployment creates each of these resource groups unless it's listed in `existingResourceGroups`; see the [README](../README.md#choose-the-resource-groups). The principal also needs:
 
 - `Microsoft.Network/virtualNetworks/subnets/join/action` on each endpoint subnet;
 - subnet write access on a VNet in `newSubnet` mode;
@@ -99,7 +99,12 @@ After deployment, resolve the two job identity principal IDs and verify that eac
 
 ```powershell
 az identity list --resource-group <replication-resource-group> --query "[].{name:name, principalId:principalId}" --output table
+az identity list --resource-group <secondary-resource-group> --query "[].{name:name, principalId:principalId}" --output table
+```
 
+The second command is needed only when the existing-resource profile uses a separate `secondaryResourceGroupName`.
+
+```powershell
 az role assignment list --scope "/subscriptions/<subscription-id>/resourceGroups/<primary-storage-rg>/providers/Microsoft.Storage/storageAccounts/<primary-storage-account>" --include-inherited --output table
 az role assignment list --scope "/subscriptions/<subscription-id>/resourceGroups/<secondary-storage-rg>/providers/Microsoft.Storage/storageAccounts/<secondary-storage-account>" --include-inherited --output table
 az role assignment list --scope "/subscriptions/<subscription-id>/resourceGroups/<acr-rg>/providers/Microsoft.ContainerRegistry/registries/<acr-name>" --include-inherited --output table

@@ -36,3 +36,4 @@ resource replica 'Microsoft.ContainerRegistry/registries/replications@2025-04-01
 // Consumers of these outputs wait for the whole module, including the replica, so their private endpoints include its data endpoint.
 output id string = registry.id
 output name string = registry.name
+output loginServer string = registry.properties.loginServer

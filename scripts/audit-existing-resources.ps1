@@ -13,6 +13,8 @@ param(
     [string[]]$New,
 
     [string]$ReplicationResourceGroupName = 'rg-azure-files-replication',
+    # Resource group for secondary-region compute; defaults to -ReplicationResourceGroupName.
+    [string]$SecondaryResourceGroupName,
     [string]$PrimaryRegionCode = 'pri',
     [string]$SecondaryRegionCode = 'sec',
     [string[]]$AlertEmailAddress,
@@ -882,6 +884,14 @@ if ($ParametersOutputPath) {
     Add-Param 'primaryRegionCode' $PrimaryRegionCode
     Add-Param 'secondaryRegionCode' $SecondaryRegionCode
     Add-Param 'environmentName' 'prod'
+    $secondaryGroup = if ($SecondaryResourceGroupName) { $SecondaryResourceGroupName } else { $ReplicationResourceGroupName }
+    $regionGroups = @{ primary = $ReplicationResourceGroupName; secondary = $secondaryGroup }
+    $regionCodes = @{ primary = $PrimaryRegionCode; secondary = $SecondaryRegionCode }
+    if ((ConvertTo-Key $secondaryGroup) -ne (ConvertTo-Key $ReplicationResourceGroupName)) {
+        $lines.Add('// Secondary-region compute, and new secondary-region services by default, go in their own resource group.')
+        Add-Param 'secondaryResourceGroupName' $secondaryGroup
+        Add-Param 'secondaryResourceGroupLocation' $locationKeys['secondary']
+    }
 
     foreach ($role in 'primary', 'secondary') {
         $storage = $storageChoice[$role]
@@ -896,10 +906,12 @@ if ($ParametersOutputPath) {
             Add-Param "${role}StorageResourceGroupName" $storage.Group
             Add-Param "${role}FileShareName" $storage.Share
         } else {
+            $lines.Add("// Optional: name the new account and share, and choose its resource group. Empty values generate a name and use $($regionGroups[$role]).")
+            Add-Param "${role}StorageAccountName" ''
+            Add-Param "${role}StorageResourceGroupName" ''
             $primaryShare = $storageChoice['primary'].Share
-            if ($role -eq 'secondary' -and $storageChoice['primary'].Mode -eq 'existing' -and $primaryShare -and $primaryShare -notmatch '^<') {
-                Add-Param 'secondaryFileShareName' $primaryShare
-            }
+            $shareValue = if ($role -eq 'secondary' -and $storageChoice['primary'].Mode -eq 'existing' -and $primaryShare -and $primaryShare -notmatch '^<') { $primaryShare } else { '' }
+            Add-Param "${role}FileShareName" $shareValue
             Add-Param "${role}StorageSkuName" 'Standard_LRS'
         }
     }
@@ -910,7 +922,14 @@ if ($ParametersOutputPath) {
         $lines.Add("// $(if ($role -eq 'primary') { 'Primary' } else { 'Secondary' }) network: $($network.Note)")
         Add-Param "${role}NetworkMode" $network.Mode
         if ($network.Mode -eq 'new') {
+            $lines.Add("// Optional: name the new VNet and its job and endpoint subnets, and choose its resource group. Empty values generate names and use $($regionGroups[$role]).")
+            Add-Param "${role}VnetName" ''
+            Add-Param "${role}VnetResourceGroupName" ''
+            Add-Param "${role}InfrastructureSubnetName" ''
+            Add-Param "${role}PrivateEndpointSubnetName" ''
             Add-Param "${role}VnetAddressPrefix" $network.AddressPrefix
+            $lines.Add('// Each new VNet keeps its private DNS zones in a resource group of its own, because the zone names are the same in both regions.')
+            Add-Param "${role}DnsResourceGroupName" "$($regionGroups[$role])-$($regionCodes[$role])-dns"
             continue
         }
         Add-Param "${role}VnetName" $network.Name
@@ -946,7 +965,46 @@ if ($ParametersOutputPath) {
         if (-not $registryChoice.EndpointsEnabled) {
             Add-Param 'registryPrivateEndpointsEnabled' $false
         }
+    } else {
+        $lines.Add("// Optional: name the new registry and choose its resource group. Empty values generate a name and use $ReplicationResourceGroupName.")
+        Add-Param 'registryName' ''
+        Add-Param 'registryResourceGroupName' ''
     }
+
+    $lines.Add('')
+    $lines.Add('// Optional names for the other resources the deployment creates. Uncomment and set the names you need; empty or omitted names are generated.')
+    $lines.Add('// param resourceNames = {')
+    foreach ($key in 'primaryIdentity', 'secondaryIdentity', 'primaryLogWorkspace', 'secondaryLogWorkspace', 'primaryEnvironment', 'secondaryEnvironment', 'primaryJob', 'secondaryJob',
+        'primaryVnetPrimaryStorageEndpoint', 'primaryVnetSecondaryStorageEndpoint', 'primaryVnetRegistryEndpoint', 'secondaryVnetPrimaryStorageEndpoint', 'secondaryVnetSecondaryStorageEndpoint', 'secondaryVnetRegistryEndpoint',
+        'actionGroup', 'primaryFailureAlert', 'secondaryFailureAlert', 'primaryFreshnessAlert', 'secondaryFreshnessAlert') {
+        $lines.Add("//   ${key}: ''")
+    }
+    $lines.Add('// }')
+
+    # The deployment creates every resource group it uses except the listed ones, so list the ones that already exist.
+    $targetGroups = @{}
+    function Add-TargetGroup([string]$Name) {
+        if ($Name) {
+            $script:targetGroups[(ConvertTo-Key $Name)] = $Name
+        }
+    }
+    Add-TargetGroup $ReplicationResourceGroupName
+    Add-TargetGroup $secondaryGroup
+    foreach ($role in 'primary', 'secondary') {
+        if ($storageChoice[$role].Mode -eq 'new') {
+            Add-TargetGroup $regionGroups[$role]
+        }
+        if ($networkChoice[$role].Mode -eq 'new') {
+            Add-TargetGroup $regionGroups[$role]
+            Add-TargetGroup "$($regionGroups[$role])-$($regionCodes[$role])-dns"
+        } elseif ($null -ne $networkChoice[$role].EndpointSubnet) {
+            Add-TargetGroup $regionGroups[$role]
+        }
+    }
+    $existingTargets = @($targetGroups.Keys | Sort-Object | Where-Object { $groupsByKey.ContainsKey($_) } | ForEach-Object { $groupsByKey[$_] })
+    $lines.Add('')
+    $lines.Add('// Resource groups that already exist. The deployment creates the other groups it uses, and leaves these unchanged.')
+    Add-Param 'existingResourceGroups' $existingTargets
 
     $lines.Add('')
     $lines.Add('// Existing endpoints this configuration uses; the template records them for reference only.')

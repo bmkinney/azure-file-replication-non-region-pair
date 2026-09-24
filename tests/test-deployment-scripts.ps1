@@ -143,6 +143,28 @@ try {
     Invoke-WithIsolatedTemp { & $switchScript -ActiveRegion secondary -WritesFenced -ParametersFile $parametersFile -Confirm:$false 6> $null }
     $creates = @($azCalls | Where-Object { $_ -like 'deployment sub create*' })
     Assert-True ($creates.Count -eq 1 -and $creates[0] -like '*activeRegion=secondary acrPublicNetworkAccess=Disabled*') "switch-direction.ps1 doesn't keep the registry closed: $($creates -join '; ')"
+
+    # With one resource group per region, each job is found and checked in its own group.
+    $image = "registry.azurecr.io/azure-files-dr-azcopy@sha256:$digest"
+    $fakeAzRules = @(
+        (New-Rule 'containerapp job list --resource-group rg-replication-pri *' "[[`"job-sync-primary`",`"southcentralus`",`"$image`"]]")
+        (New-Rule 'containerapp job list --resource-group rg-replication-sec *' "[[`"job-sync-secondary`",`"westus`",`"$image`"]]")
+        (New-Rule 'containerapp job execution list --resource-group rg-replication-pri --name job-sync-primary *' '0')
+        (New-Rule 'containerapp job execution list --resource-group rg-replication-sec --name job-sync-secondary *' '0')
+        (New-Rule 'deployment sub create*' (ConvertTo-Json -InputObject $outputs -Depth 5 -Compress))
+    )
+    Invoke-WithIsolatedTemp { & $switchScript -ActiveRegion secondary -WritesFenced -ResourceGroupName rg-replication-pri -SecondaryResourceGroupName rg-replication-sec -ParametersFile $parametersFile -Confirm:$false 6> $null }
+    Assert-True (@($azCalls | Where-Object { $_ -like 'containerapp job execution list*' }).Count -eq 2) "switch-direction.ps1 did not check each job in its own resource group: $($azCalls -join '; ')"
+    Assert-True (@($azCalls | Where-Object { $_ -like 'deployment sub create*' }).Count -eq 1) 'switch-direction.ps1 did not deploy once across two resource groups'
+
+    $failure = $null
+    try {
+        Invoke-WithIsolatedTemp { & $switchScript -ActiveRegion secondary -WritesFenced -ResourceGroupName rg-replication-pri -ParametersFile $parametersFile -Confirm:$false 6> $null }
+    } catch {
+        $failure = $_.Exception.Message
+    }
+    Assert-True ($failure -like '*found 1.*-SecondaryResourceGroupName*') "a missing secondary resource group was not explained: $failure"
+    Assert-True (@($azCalls | Where-Object { $_ -like 'deployment sub create*' }).Count -eq 0) 'switch-direction.ps1 deployed with only one job'
 } finally {
     Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

@@ -7,6 +7,10 @@ param location string
 param addressPrefix string
 
 param jobSubnetName string
+
+@description('Name of the private endpoint subnet.')
+param endpointSubnetName string = 'endpoints'
+
 param tags object
 
 resource virtualNetwork 'Microsoft.Network/virtualNetworks@2024-10-01' = {
@@ -29,7 +33,7 @@ resource virtualNetwork 'Microsoft.Network/virtualNetworks@2024-10-01' = {
         }
       }
       {
-        name: 'endpoints'
+        name: endpointSubnetName
         properties: {
           addressPrefix: cidrSubnet(addressPrefix, 24, 2)
           privateEndpointNetworkPolicies: 'Disabled'
@@ -41,4 +45,4 @@ resource virtualNetwork 'Microsoft.Network/virtualNetworks@2024-10-01' = {
 
 output id string = virtualNetwork.id
 output jobSubnetId string = '${virtualNetwork.id}/subnets/${jobSubnetName}'
-output endpointSubnetId string = '${virtualNetwork.id}/subnets/endpoints'
+output endpointSubnetId string = '${virtualNetwork.id}/subnets/${endpointSubnetName}'

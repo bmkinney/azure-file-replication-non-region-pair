@@ -251,12 +251,24 @@ try {
     ) 'the reuse parameter file'
     Assert-True (-not $generated.Contains('primaryEndpointsToCreate')) 'endpoints that already exist were requested again'
     Assert-True (-not ($generated -match '<[^>]+>')) 'the reuse parameter file has unexpected placeholders'
+    Assert-Contains $generated @(
+        "param registryName = ''", "param registryResourceGroupName = ''",
+        "param secondaryVnetName = ''", "param secondaryVnetResourceGroupName = ''", "param secondaryPrivateEndpointSubnetName = ''",
+        "param secondaryDnsResourceGroupName = 'rg-azure-files-replication-sec-dns'",
+        '// param resourceNames = {', "//   primaryJob: ''", "//   secondaryFreshnessAlert: ''",
+        'param existingResourceGroups = []'
+    ) 'the reuse parameter file'
+    Assert-True (-not $generated.Contains('param secondaryResourceGroupName')) 'a single resource group layout wrote a secondary resource group'
 
-    $generated = Invoke-Generation 'create.bicepparam' @{ New = @('primaryNetwork,secondaryStorage') }
+    $generated = Invoke-Generation 'create.bicepparam' @{ New = @('primaryNetwork,secondaryStorage'); ReplicationResourceGroupName = 'rg-network'; SecondaryResourceGroupName = 'rg-replication-sec' }
     Assert-Contains $generated @(
         "param primaryNetworkMode = 'new'", "param primaryVnetAddressPrefix = '10.10.0.0/16'",
         "param secondaryStorageMode = 'new'", "param secondaryFileShareName = 'share'", "param secondaryStorageSkuName = 'Standard_LRS'",
-        "param registryMode = 'existing'", "param registryName = 'acrshared'", "'<operations-email-address>'"
+        "param registryMode = 'existing'", "param registryName = 'acrshared'", "'<operations-email-address>'",
+        "param resourceGroupName = 'rg-network'", "param secondaryResourceGroupName = 'rg-replication-sec'", "param secondaryResourceGroupLocation = 'northcentralus'",
+        "param secondaryStorageAccountName = ''", "param secondaryStorageResourceGroupName = ''",
+        "param primaryDnsResourceGroupName = 'rg-network-pri-dns'",
+        "param existingResourceGroups = [`n  'rg-network'`n]"
     ) 'the create parameter file'
 
     # A second SMB account in the primary region makes the source ambiguous.

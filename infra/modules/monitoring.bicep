@@ -33,11 +33,18 @@ param replicationLagThresholdMinutes int = 30
 param monitoringEnabled bool = true
 param tags object = {}
 
+@description('Optional names; empty values keep the generated names.')
+param actionGroupName string = ''
+param primaryFailureAlertName string = ''
+param secondaryFailureAlertName string = ''
+param primaryFreshnessAlertName string = ''
+param secondaryFreshnessAlertName string = ''
+
 @description('ISO 8601 UTC start of the freshness grace period. Defaults to the deployment time so a newly activated direction has one lag threshold to record and ingest its first success.')
 param freshnessGraceStartTime string = utcNow('o')
 
 var monitoringToken = uniqueString(subscription().id, resourceGroup().id, environmentName)
-var actionGroupName = 'ag-replication-${monitoringToken}'
+var resolvedActionGroupName = empty(actionGroupName) ? 'ag-replication-${monitoringToken}' : actionGroupName
 var lagWindowSize = 'PT${replicationLagThresholdMinutes}M'
 // Until one threshold after deployment, the active direction counts as fresh; activation otherwise alerts before the first run's logs arrive.
 var freshnessQuery = format('''
@@ -55,7 +62,7 @@ var emailReceivers = map(alertEmailAddresses, (emailAddress, index) => {
 })
 
 resource replicationActionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
-  name: actionGroupName
+  name: resolvedActionGroupName
   location: 'global'
   tags: tags
   properties: {
@@ -66,7 +73,7 @@ resource replicationActionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
 }
 
 resource primaryFailureAlert 'Microsoft.Insights/metricAlerts@2026-01-01' = {
-  name: 'alert-replication-failed-primary-${monitoringToken}'
+  name: empty(primaryFailureAlertName) ? 'alert-replication-failed-primary-${monitoringToken}' : primaryFailureAlertName
   location: 'global'
   tags: tags
   properties: {
@@ -110,7 +117,7 @@ resource primaryFailureAlert 'Microsoft.Insights/metricAlerts@2026-01-01' = {
 }
 
 resource secondaryFailureAlert 'Microsoft.Insights/metricAlerts@2026-01-01' = {
-  name: 'alert-replication-failed-secondary-${monitoringToken}'
+  name: empty(secondaryFailureAlertName) ? 'alert-replication-failed-secondary-${monitoringToken}' : secondaryFailureAlertName
   location: 'global'
   tags: tags
   properties: {
@@ -154,7 +161,7 @@ resource secondaryFailureAlert 'Microsoft.Insights/metricAlerts@2026-01-01' = {
 }
 
 resource primaryFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
-  name: 'alert-replication-stale-primary-${monitoringToken}'
+  name: empty(primaryFreshnessAlertName) ? 'alert-replication-stale-primary-${monitoringToken}' : primaryFreshnessAlertName
   location: primaryLocation
   tags: tags
   properties: {
@@ -189,7 +196,7 @@ resource primaryFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-0
 }
 
 resource secondaryFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
-  name: 'alert-replication-stale-secondary-${monitoringToken}'
+  name: empty(secondaryFreshnessAlertName) ? 'alert-replication-stale-secondary-${monitoringToken}' : secondaryFreshnessAlertName
   location: secondaryLocation
   tags: tags
   properties: {
