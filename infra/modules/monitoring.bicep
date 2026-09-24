@@ -33,15 +33,21 @@ param replicationLagThresholdMinutes int = 30
 param monitoringEnabled bool = true
 param tags object = {}
 
+@description('ISO 8601 UTC start of the freshness grace period. Defaults to the deployment time so a newly activated direction has one lag threshold to record and ingest its first success.')
+param freshnessGraceStartTime string = utcNow('o')
+
 var monitoringToken = uniqueString(subscription().id, resourceGroup().id, environmentName)
 var actionGroupName = 'ag-replication-${monitoringToken}'
 var lagWindowSize = 'PT${replicationLagThresholdMinutes}M'
+// Until one threshold after deployment, the active direction counts as fresh; activation otherwise alerts before the first run's logs arrive.
 var freshnessQuery = format('''
+  let graceEndsAt = datetime({1}) + {0}m;
   ContainerAppConsoleLogs_CL
   | where TimeGenerated >= ago({0}m)
   | where Log_s contains "AZURE_FILES_REPLICATION_SUCCEEDED"
   | summarize SuccessCount = count()
-''', replicationLagThresholdMinutes)
+  | extend SuccessCount = iff(now() < graceEndsAt, max_of(SuccessCount, 1), SuccessCount)
+''', replicationLagThresholdMinutes, freshnessGraceStartTime)
 var emailReceivers = map(alertEmailAddresses, (emailAddress, index) => {
   name: 'replication-email-${index + 1}'
   emailAddress: emailAddress
