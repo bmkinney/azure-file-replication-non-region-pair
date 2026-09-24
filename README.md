@@ -95,6 +95,25 @@ az account show --output table
 az account set --subscription <subscription-id>
 ```
 
+## Inventory check
+
+`scripts/inventory.ps1` reports which services already exist and what a deployment would provision. It is read-only: it runs only Azure CLI `show`, `list`, Bicep build, and deployment what-if commands.
+
+```powershell
+# Greenfield demonstration profile
+pwsh ./scripts/inventory.ps1
+
+# Existing-resource profile, with a shareable JSON report
+pwsh ./scripts/inventory.ps1 -ParametersFile ./infra/existing.bicepparam -OutputPath ./inventory-report.json
+```
+
+The report contains two tables:
+
+- **Prerequisites** lists placeholder parameters, resource provider registration, and Container Apps availability in both regions. For the greenfield profile, it also checks storage SKU availability. For the existing-resource profile, it checks the storage accounts and shares, the VNets and delegated subnets, the registry and digest-pinned image, the [server-side copy network layout](#network-requirements-for-server-side-copy), the private DNS records for the file endpoints, and registry reachability. Each item is `Ready`, `Action required`, `Warning`, or `Not verified`.
+- **Template resources** lists every resource from `az deployment sub what-if` as `Exists`, `Exists, will be updated`, `To be provisioned`, or `Exists, not managed by this template`.
+
+Resource lookups need Reader access. What-if needs deployment permissions; use `-SkipWhatIf` to omit it. Resolve every `Action required` item before deploying.
+
 ## RBAC requirements
 
 The templates create two user-assigned managed identities, one for each regional Container Apps Job, and create these assignments automatically:
@@ -138,6 +157,12 @@ Reaching the other region only through a hub VNet or Virtual WAN hub satisfies n
 A VNet can link only one private DNS zone with a given name. If workload VNets share a central `privatelink.file.core.windows.net` zone, don't add a second private endpoint for an existing storage account to that zone: its record can redirect other workloads to the wrong endpoint. Use dedicated replication VNets with their own zone links, or use the direct-peering layout.
 
 ### Before you deploy
+
+Run the [inventory check](#inventory-check) with your parameter file after you create it in [Deploy in stages](#deploy-in-stages); it automates most of these checks:
+
+```powershell
+pwsh ./scripts/inventory.ps1 -ParametersFile ./infra/existing.bicepparam
+```
 
 | Check | Pass condition |
 | --- | --- |
@@ -287,7 +312,9 @@ When AzCopy fails, the wrapper prints the last lines of the AzCopy log with URLs
 az bicep build --file infra/main.bicep
 az deployment sub validate --location southcentralus --parameters infra/main.bicepparam
 az deployment sub what-if --location southcentralus --parameters infra/main.bicepparam
+pwsh ./scripts/inventory.ps1
 pwsh ./tests/test-monitoring-template.ps1
+pwsh ./tests/test-inventory.ps1
 pwsh ./src/azcopy-job/test-run-sync.ps1
 ```
 
