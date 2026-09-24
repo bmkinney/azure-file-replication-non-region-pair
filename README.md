@@ -114,6 +114,41 @@ The report contains two tables:
 
 Resource lookups need Reader access. What-if needs deployment permissions; use `-SkipWhatIf` to omit it. Resolve every `Action required` item before deploying.
 
+## Reuse audit
+
+`scripts/audit-existing-resources.ps1` finds existing services that the existing-resource profile can reuse, before you choose values for a parameter file. It audits the resource groups you name, or every resource group in the current subscription if you name none. It's read-only: it runs only Azure CLI `show`, `list`, and REST `GET` requests.
+
+```powershell
+# Named resource groups; a comma-separated list also works
+pwsh ./scripts/audit-existing-resources.ps1 -ResourceGroupName rg-storage, rg-network, rg-dns
+
+# Every resource group in the current subscription, with a shareable JSON report
+pwsh ./scripts/audit-existing-resources.ps1 -OutputPath ./audit-report.json
+```
+
+The **Services** table rates each resource as `Reusable`, `Needs changes`, `Not suitable`, or `Not verified`, and the detail explains any required change:
+
+| Service | Reusable when |
+| --- | --- |
+| Storage account | It's a StorageV2, FileStorage, or general-purpose v1 account with an SMB share. If public network access is disabled, it also needs an approved file private endpoint. |
+| File share | The share uses SMB. NFS shares aren't supported. |
+| Virtual network | It contains a reusable Container Apps subnet. |
+| Container Apps subnet | It's delegated to `Microsoft.App/environments` and empty. An empty subnet that isn't delegated needs the delegation. A subnet that an environment already uses, or that is smaller than `/27`, isn't suitable. |
+| Private endpoint | It's a file or registry endpoint with an approved connection. |
+| Private DNS zone | It's a `privatelink.file` or `privatelink.azurecr.io` zone linked to at least one VNet. |
+| Container registry | The jobs can reach it, through private endpoints on Premium or through public access. A registry with ABAC repository permissions needs Container Registry Repository Reader for the job identities instead of AcrPull. |
+
+The **Replication network readiness** table shows, for each VNet:
+
+- the reusable job subnet;
+- the storage accounts with approved file endpoints in the VNet or in a directly peered VNet;
+- whether the linked `privatelink.file` zone resolves each account to its endpoint; and
+- the registries with endpoints.
+
+Choose two VNets in different regions. Each one needs a job subnet, file endpoints that resolve for both storage accounts, and a registry endpoint. Record your choices in `infra/existing.bicepparam`, then validate them with the [inventory check](#inventory-check).
+
+The audit lists resources across the subscription, so endpoints, peerings, and DNS zones in resource groups you didn't name still count toward the audited resources. It doesn't see other subscriptions, such as private DNS zones in a central connectivity subscription. For VNets that use custom DNS servers, it reports name resolution as not verified. Reader access is enough; the audit ignores resources you can't read.
+
 ## RBAC requirements
 
 The templates create two user-assigned managed identities, one for each regional Container Apps Job, and create these assignments automatically:
@@ -157,6 +192,8 @@ Reaching the other region only through a hub VNet or Virtual WAN hub satisfies n
 A VNet can link only one private DNS zone with a given name. If workload VNets share a central `privatelink.file.core.windows.net` zone, don't add a second private endpoint for an existing storage account to that zone: its record can redirect other workloads to the wrong endpoint. Use dedicated replication VNets with their own zone links, or use the direct-peering layout.
 
 ### Before you deploy
+
+If you haven't chosen the storage accounts, VNets, and registry yet, run the [reuse audit](#reuse-audit) against the candidate resource groups first.
 
 Run the [inventory check](#inventory-check) with your parameter file after you create it in [Deploy in stages](#deploy-in-stages); it automates most of these checks:
 
@@ -316,6 +353,7 @@ pwsh ./scripts/inventory.ps1
 pwsh ./tests/test-monitoring-template.ps1
 pwsh ./tests/test-foundation-templates.ps1
 pwsh ./tests/test-inventory.ps1
+pwsh ./tests/test-audit.ps1
 pwsh ./tests/test-deployment-scripts.ps1
 pwsh ./src/azcopy-job/test-run-sync.ps1
 ```
