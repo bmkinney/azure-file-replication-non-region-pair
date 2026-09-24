@@ -26,6 +26,8 @@ param secondaryInfrastructureSubnetName = '<secondary-container-apps-subnet>'
 param registryName = '<existing-premium-acr>'
 param registryResourceGroupName = '<acr-resource-group>'
 
+// Reference only: list the private endpoints your replication network layout uses.
+// This example shows the local-endpoint layout; the template does not validate these IDs.
 param existingPrivateEndpointIds = [
   '<primary-vnet-to-primary-file-endpoint-id>'
   '<primary-vnet-to-secondary-file-endpoint-id>'

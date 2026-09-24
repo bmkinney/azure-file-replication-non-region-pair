@@ -2,7 +2,7 @@
 
 ## Scope
 
-Deploy private, active/passive Azure Files replication across two customer-selected Azure regions. The regions do not need to form an Azure paired-region set. The primary region is authoritative initially, and the secondary region can become authoritative during failover and run reverse synchronization after the primary region returns.
+Deploy private, active/passive Azure Files replication across two selected Azure regions. The regions do not need to form an Azure paired-region set. The primary region is authoritative initially, and the secondary region can become authoritative during failover and run reverse synchronization after the primary region returns.
 
 ## Topology
 
@@ -18,6 +18,15 @@ Deploy private, active/passive Azure Files replication across two customer-selec
 - A Premium ACR in the primary region with geo-replication to the secondary region and a private endpoint in each VNet.
 - Regional Log Analytics workspaces.
 - One shared Azure Monitor email Action Group, two job-failure metric alerts, and one freshness query alert per regional workspace.
+
+### Server-side copy requirement
+
+AzCopy copies file data directly between the two storage services. With private endpoints, each job's network must have private access to both storage accounts in one of two layouts:
+
+- **Local endpoints.** The job VNet contains private endpoints for both accounts, and DNS in that VNet resolves both account names to them. The greenfield profile uses this layout with split-horizon DNS.
+- **Direct peering.** The job runs in the VNet that contains its source account's private endpoint, and the two regional VNets are directly peered.
+
+Reaching the other region only through a hub VNet or Virtual WAN hub fails with `403 CannotVerifyCopySource`. For the existing-resource profile, confirm one of these layouts before deployment; see the [README](../README.md#network-requirements-for-server-side-copy).
 
 ## RBAC and service permissions
 
@@ -65,7 +74,7 @@ The existing-resource profile also executes nested deployments in the resource g
 ### Operational access
 
 - `scripts/switch-direction.ps1` performs another subscription deployment. The failover operator therefore needs the same deployment and role-assignment permissions described above.
-- A user who only runs a controlled job test does not need storage data access because the job uses its own managed identity. That user needs job read access plus `Microsoft.App/jobs/start/action` and `Microsoft.App/jobs/stop/action` on the relevant Container Apps Jobs.
+- Starting a job requires `Microsoft.App/jobs/start/action`, which is privileged: a start request can override the image, command, and environment variables, and the execution runs as the job's managed identity with data access to both shares. Grant start and stop rights only to replication operators. Starting the standby job without an override performs a real reverse synchronization; use a `DRY_RUN=true` execution override for readiness tests.
 - Users investigating failures need read access to the Container Apps Jobs, alert resources, and Log Analytics workspaces. Querying workspace data also requires a Log Analytics data-query role, such as Log Analytics Reader, at the workspace or a parent scope.
 
 ### Integrations without additional runtime RBAC

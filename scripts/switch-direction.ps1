@@ -19,9 +19,18 @@ $ErrorActionPreference = 'Stop'
 function Invoke-AzCli {
     param([Parameter(Mandatory)][string[]]$Arguments)
 
-    $output = & az @Arguments 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        throw "az $($Arguments -join ' ') failed:`n$($output -join [Environment]::NewLine)"
+    # Azure CLI writes warnings to stderr; keeping them out of stdout protects JSON parsing.
+    $errorPath = [IO.Path]::GetTempFileName()
+    try {
+        $output = & az @Arguments --only-show-errors 2> $errorPath
+        $exitCode = $LASTEXITCODE
+        $errorOutput = [IO.File]::ReadAllText($errorPath)
+    } finally {
+        Remove-Item -LiteralPath $errorPath -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($exitCode -ne 0) {
+        throw "az $($Arguments -join ' ') failed:`n$errorOutput`n$($output -join [Environment]::NewLine)"
     }
     return ($output -join [Environment]::NewLine)
 }

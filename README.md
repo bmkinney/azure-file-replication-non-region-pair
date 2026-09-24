@@ -74,7 +74,7 @@ See [docs/infrastructure-plan.md](docs/infrastructure-plan.md) for topology and 
 ## Deployment profiles
 
 - `infra/main.bicep` creates the complete demonstration topology, including storage, VNets, endpoints, DNS, and ACR.
-- `infra/existing.bicep` references customer-owned storage, networking, private endpoints, DNS, and Premium ACR. It creates replication identities and RBAC, Log Analytics workspaces, Container Apps environments and jobs, and Azure Monitor alerting resources.
+- `infra/existing.bicep` references existing storage accounts, file shares, networking, private endpoints, DNS, and a container registry. It creates replication identities and RBAC, Log Analytics workspaces, Container Apps environments and jobs, and Azure Monitor alerting resources.
 
 The existing-resource profile is additive. It does not redeploy or change the supplied storage accounts, VNets, private endpoints, private DNS zones, or ACR.
 
@@ -84,9 +84,9 @@ The existing-resource profile is additive. It does not redeploy or change the su
 - Subscription Owner or equivalent rights to create resource groups, resources, and role assignments.
 - PowerShell 7 when using `scripts/deploy.ps1`; direct Bicep deployment needs only Azure CLI.
 - Sufficient Premium ACR, Container Apps environment, private endpoint, and regional storage quota.
-- For the existing-resource profile, an existing Premium ACR and a digest-pinned AzCopy job image in that ACR.
-- One delegated Container Apps infrastructure subnet of at least `/23` in each region.
-- Existing private DNS resolution and approved private endpoints so each regional VNet can resolve and reach both file shares and the ACR.
+- For the existing-resource profile, an existing ACR that both job subnets can reach (Premium when reached through private endpoints) and a digest-pinned AzCopy job image in that ACR.
+- One dedicated, empty Container Apps infrastructure subnet of at least `/23`, delegated to `Microsoft.App/environments`, in each region.
+- A network path that supports server-side copy between the two private storage accounts. See [Network requirements for server-side copy](#network-requirements-for-server-side-copy).
 
 Review the active subscription before deployment:
 
@@ -114,46 +114,108 @@ When `scripts/deploy.ps1` builds the image instead of receiving `-ContainerImage
 
 No additional runtime RBAC assignment is required for Log Analytics or Azure Monitor. The Container Apps environments are configured with the workspace credentials during deployment, and the alert rules call the Action Group as an Azure platform integration. Action Group email recipients should confirm and test notification delivery before production use.
 
-An operator using `scripts/switch-direction.ps1` needs the same deployment permissions because the script redeploys the template. An operator who only starts or stops a job for testing needs job read access plus `Microsoft.App/jobs/start/action` and `Microsoft.App/jobs/stop/action` on the relevant Container Apps Jobs.
+An operator using `scripts/switch-direction.ps1` needs the same deployment permissions because the script redeploys the template.
+
+Treat `Microsoft.App/jobs/start/action` as privileged. A start request can override the job's image, command, and environment variables, and the execution runs as the job's managed identity, which can read, write, and delete data in both shares. Starting the standby job without an override performs a real reverse synchronization. Grant start and stop rights only to replication operators, and use a dry run for readiness tests; see [Validate before enabling the schedule](#validate-before-enabling-the-schedule).
 
 See [docs/infrastructure-plan.md](docs/infrastructure-plan.md#rbac-and-service-permissions) for the greenfield/brownfield permission boundaries and verification commands.
 
-## Customer deployment from Azure Cloud Shell
+## Existing-resource deployment from Azure Cloud Shell
 
-Clone the repository and create a local parameter file that Git ignores:
+Use this profile when the storage accounts, file shares, VNets, private endpoints, private DNS zones, and container registry already exist. Workloads that use the shares, such as Kubernetes clusters or VMs, are not changed; the replication jobs run in their own Container Apps environments.
+
+### Network requirements for server-side copy
+
+AzCopy copies Azure Files data directly between the storage services. With private endpoints, the copy succeeds only when the network that runs each job has private access to both storage accounts in one of these layouts:
+
+| Layout | Requirement |
+| --- | --- |
+| Local endpoints (used by `infra/main.bicep`) | Each job VNet contains a private endpoint for **both** storage accounts, and DNS in that VNet resolves both account names to those endpoints. |
+| Direct peering | Each job runs in the VNet that contains its source account's private endpoint, and the two regional VNets are directly peered. |
+
+Reaching the other region only through a hub VNet or Virtual WAN hub satisfies neither layout, and the copy fails with `403 CannotVerifyCopySource`. Microsoft documents this behavior for [Blob copies between network-restricted accounts](https://learn.microsoft.com/troubleshoot/azure/azure-storage/blobs/connectivity/copy-blobs-between-storage-accounts-network-restriction); Azure Files server-side copies use the same mechanism.
+
+A VNet can link only one private DNS zone with a given name. If workload VNets share a central `privatelink.file.core.windows.net` zone, don't add a second private endpoint for an existing storage account to that zone: its record can redirect other workloads to the wrong endpoint. Use dedicated replication VNets with their own zone links, or use the direct-peering layout.
+
+### Before you deploy
+
+| Check | Pass condition |
+| --- | --- |
+| Network path | One of the layouts above. NSG, route, and firewall rules on the job subnets allow HTTPS to both storage accounts' private endpoints and to the registry. |
+| Container Apps subnets | Dedicated, empty, and delegated to `Microsoft.App/environments` in each region. If job subnet traffic egresses through a firewall, allow the documented Container Apps outbound dependencies. |
+| File shares | SMB shares in classic `Microsoft.Storage` storage accounts. NFS shares and `Microsoft.FileShares` resources aren't supported. The destination share is empty or disposable and has quota for the source data plus growth, because deletions aren't replicated. |
+| Registry | Reachable from both job subnets. If the registry uses ABAC repository permissions, `AcrPull` isn't honored; assign **Container Registry Repository Reader** to both job identities instead. |
+| Subscription and rights | All referenced resources are in the deployment subscription. The deploying identity can create resources and role assignments in the replication resource group, and can assign roles on both storage accounts and the registry. |
+| Parameter file | Keep the default `tags`, or include `Workload: 'azure-files-dr-replication'`, because `scripts/switch-direction.ps1` finds the jobs by that tag. `existingPrivateEndpointIds` is recorded for reference only; the template doesn't validate endpoint approval or DNS. |
+
+### Put the AzCopy image in the registry
+
+Clone the repository in Cloud Shell and run the remaining commands from its root:
 
 ```bash
 git clone https://github.com/bmkinney/azure-file-replication-non-region-pair.git
 cd azure-file-replication-non-region-pair
+```
+
+If the registry allows public network access, build the image and read its digest:
+
+```bash
+az acr build --registry <registry-name> --image azure-files-dr-azcopy:10.30.1 src/azcopy-job
+az acr manifest show-metadata <registry-name>.azurecr.io/azure-files-dr-azcopy:10.30.1 \
+	--registry <registry-name> --query digest --output tsv
+```
+
+If the registry denies public network access, Cloud Shell can't upload the build context or read manifests. Build in a temporary registry, then import the image by digest. Import into a network-restricted registry requires **Allow trusted services**, which is enabled by default.
+
+```bash
+az acr create --resource-group <resource-group> --name <build-registry> --sku Basic
+az acr build --registry <build-registry> --image azure-files-dr-azcopy:10.30.1 src/azcopy-job
+DIGEST=$(az acr manifest show-metadata <build-registry>.azurecr.io/azure-files-dr-azcopy:10.30.1 \
+	--registry <build-registry> --query digest --output tsv)
+az acr import --name <registry-name> \
+	--source "azure-files-dr-azcopy@$DIGEST" \
+	--registry "$(az acr show --name <build-registry> --query id --output tsv)" \
+	--image azure-files-dr-azcopy:10.30.1
+az acr delete --name <build-registry> --yes
+```
+
+Set `containerImage` in the parameter file to `<registry-name>.azurecr.io/azure-files-dr-azcopy@<digest>`.
+
+### Deploy in stages
+
+Create a local parameter file that Git ignores:
+
+```bash
 cp infra/existing.example.bicepparam infra/existing.bicepparam
 ```
 
-Edit every placeholder in `infra/existing.bicepparam`. The six endpoint IDs represent four file endpoints, allowing both VNets to reach both file accounts, plus one ACR endpoint in each VNet. The endpoints and corresponding `privatelink.file.*` and `privatelink.azurecr.io` DNS records must already work from the supplied VNets.
+Edit every placeholder in `infra/existing.bicepparam`, and keep `activeRegion = 'none'` for the first deployment so both jobs are created without a schedule. Set `alertEmailAddresses` to one or more monitored operations addresses. The deployment creates an Azure Monitor Action Group and enables Common Alert Schema for every receiver. Supported `replicationLagThresholdMinutes` values are `20`, `30`, and `60`; the default is `30`.
 
-Set `alertEmailAddresses` to one or more monitored operations addresses. The deployment creates an Azure Monitor Action Group and enables Common Alert Schema for every receiver. Supported `replicationLagThresholdMinutes` values are `20`, `30`, and `60`; the default is `30`.
-
-Validate and preview the additive deployment:
+Validate, preview, and deploy:
 
 ```bash
 az bicep build --file infra/existing.bicep
-az deployment sub validate \
-	--location <primary-region> \
-	--parameters infra/existing.bicepparam
-az deployment sub what-if \
+az deployment sub validate --location <primary-region> --parameters infra/existing.bicepparam
+az deployment sub what-if --location <primary-region> --parameters infra/existing.bicepparam
+az deployment sub create --name azure-files-dr-stage1 \
 	--location <primary-region> \
 	--parameters infra/existing.bicepparam
 ```
 
-Deploy directly with Bicep. `containerImage` in the parameter file must be pinned to a digest in the existing ACR, and `activeRegion` should be `primary` when the customer is ready to start the schedule.
+Deployments run server-side. If the Cloud Shell session ends (sessions time out after 20 minutes without interaction), check progress with `az deployment sub show --name azure-files-dr-stage1 --query properties.provisioningState`.
+
+After the validation steps below succeed, enable the primary schedule:
 
 ```bash
-az deployment sub create \
-	--name azure-files-dr-$(date +%Y%m%d%H%M%S) \
+az deployment sub create --name azure-files-dr-activate \
 	--location <primary-region> \
-	--parameters infra/existing.bicepparam
+	--parameters infra/existing.bicepparam \
+	--parameters activeRegion=primary
 ```
 
-Alternatively, use PowerShell to orchestrate the two-stage deployment. Supplying a prebuilt digest avoids requiring Cloud Shell data-plane access to a private registry; omit `-ContainerImage` when ACR Tasks and manifest access are available:
+Then set `activeRegion = 'primary'` in `infra/existing.bicepparam`. A later deployment that still uses `none` removes the schedule and disables the freshness alerts.
+
+`scripts/deploy.ps1` runs both stages in one command, but it activates the primary schedule without pausing for validation, and every run redeploys `activeRegion=none` before activating the primary region again. Use it only for an initial deployment:
 
 ```powershell
 pwsh ./scripts/deploy.ps1 `
@@ -162,7 +224,62 @@ pwsh ./scripts/deploy.ps1 `
 	-ContainerImage '<registry>.azurecr.io/<repository>@sha256:<digest>'
 ```
 
-The deploying identity needs permission to create resources and role assignments in the replication resource group and to assign Azure Files data roles on both storage accounts and `AcrPull` on the existing ACR.
+### Validate before enabling the schedule
+
+1. Run the primary job once, then check the execution:
+
+   ```bash
+   az containerapp job start --name <primary-job> --resource-group <replication-resource-group>
+   az containerapp job execution list --name <primary-job> --resource-group <replication-resource-group> --output table
+   ```
+
+   The execution should end as `Succeeded`, and the console log should contain `AZURE_FILES_REPLICATION_SUCCEEDED`. The marker includes `startedAt` and `durationSeconds`; use the duration to estimate the final synchronization time for a planned failover. To follow the logs live, run `az containerapp job logs show --name <primary-job> --resource-group <replication-resource-group> --container azcopy --follow`.
+
+2. From a client in the secondary region that mounts the destination share, such as a VM or Kubernetes pod, compare file counts and confirm that modification times match the source.
+
+3. Test the standby job with a dry run. A dry run checks the image pull, managed identity, DNS, private endpoints, and read access to both shares without writing data. Export the job's template:
+
+   ```bash
+   az containerapp job show --name <secondary-job> --resource-group <replication-resource-group> \
+       --query properties.template --output yaml > standby-dry-run.yaml
+   ```
+
+   Add this entry to the `env` list of the `azcopy` container in `standby-dry-run.yaml`, then start one execution with the edited template. The override applies only to that execution.
+
+   ```yaml
+   - name: DRY_RUN
+     value: 'true'
+   ```
+
+   ```bash
+   az containerapp job start --name <secondary-job> --resource-group <replication-resource-group> \
+       --yaml standby-dry-run.yaml
+   ```
+
+   The log reports `AZURE_FILES_REPLICATION_DRY_RUN_COMPLETED` with `wouldCopy`, `wouldRemove`, and `wouldSetProperties` counts. Expect `wouldCopy` to include most replicated files: sync compares REST `Last-Modified` times, and replicated files carry their copy time. A real reverse run would therefore rewrite nearly every file in the primary share.
+
+   > [!WARNING]
+   > `DRY_RUN` requires an image built from a revision of `src/azcopy-job/run-sync.sh` that supports it. An older image ignores the variable and performs a real reverse synchronization.
+
+4. Enable the schedule with the activation deployment, confirm two or three scheduled successes, and test the Action Group from its **Test action group** pane in the Azure portal.
+
+### Troubleshooting
+
+| Symptom | Likely cause |
+| --- | --- |
+| `403 CannotVerifyCopySource` | The network path meets neither server-side copy layout. |
+| `403 AuthorizationFailure` | DNS resolved an account name to its public endpoint, or the storage firewall blocked the request. |
+| `403 AuthorizationPermissionMismatch` | A role assignment is missing or hasn't propagated yet; wait about 10 minutes and retry. |
+| Image pull errors in `ContainerAppSystemLogs_CL` | A missing registry role, an ABAC-mode registry, or no network path to the registry. |
+| Execution fails after about 60 minutes | The copy exceeded the one-hour replica timeout, for example during the initial copy of a large share. |
+
+When AzCopy fails, the wrapper prints the last lines of the AzCopy log with URLs redacted, so file paths aren't written to Log Analytics.
+
+### Avoid during initial testing
+
+- Starting the secondary job without a dry-run override, including **Run now** in the portal. It performs a real reverse synchronization.
+- Setting `DELETE_DESTINATION=true`, running `scripts/switch-direction.ps1` against production data, or rerunning `scripts/deploy.ps1` after the initial deployment.
+- Adding a second private endpoint for an existing storage account to a shared private DNS zone.
 
 ## Validate the demonstration profile
 
@@ -185,6 +302,19 @@ pwsh ./scripts/deploy.ps1
 
 Deployment changes Azure resources and is intentionally not run automatically from this repository.
 
+## Replication job settings
+
+`src/azcopy-job/run-sync.sh` runs `azcopy sync` with `--preserve-info=true`, `--include-root=true`, and `--force-if-read-only=true`. SMB timestamps and attributes, including those of the share root, are copied, and read-only destination files can be updated. AzCopy defaults `--preserve-info` to `false` for Linux SMB share-to-share copies, so the wrapper sets it explicitly.
+
+| Environment variable | Default | Purpose |
+| --- | --- | --- |
+| `DELETE_DESTINATION` | `false` | Set to `true` to delete destination files that no longer exist at the source. `prompt` is rejected because jobs are non-interactive. |
+| `PRESERVE_PERMISSIONS` | `true` | Copies NTFS ACLs and ownership. Set to `false` to skip permissions, for example when the shares don't use identity-based access. |
+| `DRY_RUN` | `false` | Reports what a synchronization would copy or remove without writing data. |
+| `AZCOPY_LOG_LEVEL` | `ERROR` | AzCopy log verbosity inside the container. The log is discarded when the execution ends; failed runs print its last lines with URLs redacted. |
+
+The templates set `DELETE_DESTINATION=false`. The other variables use the wrapper defaults unless an execution overrides them.
+
 ## Monitoring and alerts
 
 Both deployment profiles create the following stateful Azure Monitor rules:
@@ -197,6 +327,8 @@ Both deployment profiles create the following stateful Azure Monitor rules:
 | Secondary replication stale | Sev 2 | No `AZURE_FILES_REPLICATION_SUCCEEDED` console marker for the configured threshold | Only when `activeRegion=secondary` |
 
 Failed-execution alerts cover scheduled and manually started jobs, including failures where the AzCopy wrapper cannot emit an error marker. Freshness is an operational RPO signal: it measures time since a completed successful AzCopy run, not the age or equality of every file. With `activeRegion=none`, both freshness rules are disabled so bootstrap and planned pauses do not generate stale-replication notifications.
+
+The success marker includes `startedAt` and `durationSeconds`. Dry runs emit `AZURE_FILES_REPLICATION_DRY_RUN_COMPLETED` instead, so they never satisfy a freshness rule.
 
 On a greenfield deployment, Log Analytics creates `ContainerAppConsoleLogs_CL` only after the first Container Apps log is ingested. The freshness rules therefore skip query validation during resource creation; Azure Monitor begins normal evaluation after the jobs emit logs and the table exists.
 
@@ -246,7 +378,7 @@ pwsh ./scripts/switch-direction.ps1 -ActiveRegion secondary -WritesFenced
 pwsh ./scripts/switch-direction.ps1 -ActiveRegion primary -WritesFenced
 ```
 
-For the existing-resource profile, also identify the customer replication resource group and parameter file:
+For the existing-resource profile, also identify the replication resource group and parameter file:
 
 ```powershell
 pwsh ./scripts/switch-direction.ps1 `
@@ -258,3 +390,5 @@ pwsh ./scripts/switch-direction.ps1 `
 ```
 
 The switch script refuses to proceed while either job is running or when the deployed images differ or are not digest-pinned.
+
+The first run in the new direction recopies files that were replicated earlier, because sync compares `Last-Modified` times and replicated files carry their copy time. Plan time and egress for a full-share copy after each switch.

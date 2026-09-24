@@ -35,8 +35,8 @@ param secondaryInfrastructureSubnetName string
 param registryName string
 param registryResourceGroupName string
 
-@minLength(6)
-@description('Resource IDs for the existing file and ACR private endpoints. They are validated as deployment inputs but never modified.')
+@minLength(1)
+@description('Resource IDs of the existing private endpoints used for replication. They are recorded in deployment outputs for reference; the template does not validate or modify them.')
 param existingPrivateEndpointIds array
 
 @allowed(['none', 'primary', 'secondary'])
