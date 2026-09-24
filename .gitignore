@@ -1,5 +1,6 @@
 infra/main.json
 infra/existing.bicepparam
+inventory-report*.json
 *.log
 .DS_Store
 .vscode/

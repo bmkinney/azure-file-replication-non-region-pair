@@ -15,7 +15,9 @@ RUN apt-get update \
 
 COPY run-sync.sh /usr/local/bin/run-sync
 
-RUN chmod 0755 /usr/local/bin/run-sync \
+# Builds from Windows checkouts can include CRLF line endings, which break /bin/sh.
+RUN sed -i 's/\r$//' /usr/local/bin/run-sync \
+    && chmod 0755 /usr/local/bin/run-sync \
     && groupadd --gid 10001 azcopy \
     && useradd --uid 10001 --gid azcopy --create-home azcopy \
     && mkdir -p /home/azcopy/.azcopy \

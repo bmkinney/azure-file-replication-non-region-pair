@@ -1,0 +1,3 @@
+# Files copied into the Linux container image must keep LF line endings.
+*.sh text eol=lf
+Dockerfile text eol=lf
