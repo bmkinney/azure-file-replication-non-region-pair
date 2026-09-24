@@ -19,6 +19,18 @@ if (-not $freshnessQuery.Contains("parameters('replicationLagThresholdMinutes')"
     throw 'The compiled freshness query does not use the lag-threshold parameter.'
 }
 
+# A newly activated direction must not alert before its first scheduled run is logged and ingested.
+$graceParameter = $template.parameters.freshnessGraceStartTime
+if (-not $graceParameter -or $graceParameter.defaultValue -ne "[utcNow('o')]") {
+    throw 'The freshness grace period must default to the deployment time in ISO 8601 format.'
+}
+if (-not $freshnessQuery.Contains("parameters('freshnessGraceStartTime')") -or -not $freshnessQuery.Contains('let graceEndsAt = datetime({1}) + {0}m;')) {
+    throw 'The compiled freshness query does not end its grace period one lag threshold after the grace start.'
+}
+if (-not $freshnessQuery.Contains('iff(now() < graceEndsAt, max_of(SuccessCount, 1), SuccessCount)')) {
+    throw 'The compiled freshness query does not treat the active direction as fresh during the grace period.'
+}
+
 $freshnessRules = @($template.resources | Where-Object {
     $_.type -eq 'Microsoft.Insights/scheduledQueryRules'
 })

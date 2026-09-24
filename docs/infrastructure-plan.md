@@ -6,18 +6,24 @@ Deploy private, active/passive Azure Files replication across two selected Azure
 
 ## Topology
 
-- One workload resource group for replication compute and supporting resources.
+- One workload resource group for replication compute and supporting resources. The existing-resource profile can also use one resource group per region or per service.
 - One split-horizon Private DNS resource group per region in the greenfield profile.
 - One VNet per region with a delegated `default` subnet and a `storage` private endpoint subnet.
 - No VNet peering.
 - One Azure Files account/share and one blob account/container per region.
 - Each VNet has Azure Files private endpoints for both file accounts.
 - Each VNet has its own same-named Private DNS zone instance. This split-horizon design prevents an unpeered VNet from resolving the other region's unreachable private endpoint address.
-- One internal Container Apps environment and AzCopy job per region. Environment zone redundancy is disabled to reduce regional capacity requirements; resilience is provided by the independent regional workers.
+- One internal Container Apps environment and AzCopy job per region. Each environment is a workload profiles environment on its delegated subnet and runs the job on the serverless Consumption profile. Environment zone redundancy is disabled to reduce regional capacity requirements; resilience is provided by the independent regional workers.
 - The greenfield profile uses ZRS for primary storage and LRS for secondary storage. Confirm those SKUs are available in the selected regions before deployment.
 - A Premium ACR in the primary region with geo-replication to the secondary region and a private endpoint in each VNet.
 - Regional Log Analytics workspaces.
 - One shared Azure Monitor email Action Group, two job-failure metric alerts, and one freshness query alert per regional workspace.
+
+The existing-resource profile keeps this topology but reuses what already exists. For each storage account and share, regional network, and the registry, a mode parameter either reuses the service or creates it as the greenfield profile would. A new VNet gets its own split-horizon zones. `newSubnet` adds only a delegated job subnet to an existing VNet. Private endpoints are created for every new service and in every new VNet, which keeps the local-endpoint layout below for them. The exception is an existing registry that the jobs reach through its public endpoint, with `registryPrivateEndpointsEnabled = false`, which gets no endpoints.
+
+Most resources that the deployment creates can take custom names. Each region's compute, which is its identity, Log Analytics workspace, Container Apps environment, and job, goes in that region's resource group; both regions can share one group. Monitoring goes with the primary region's compute. New storage accounts, VNets, the registry, private endpoints, and private DNS zones can each go in a resource group of their own. See [Reuse or create each service](../README.md#reuse-or-create-each-service) and [Customize the parameter file](../README.md#customize-the-parameter-file) in the README.
+
+Container Apps environments on a VNet are workload profiles environments, which need a subnet of at least `/27` delegated to `Microsoft.App/environments`. The greenfield profile and new VNets use a `/23` job subnet.
 
 ### Server-side copy requirement
 
@@ -62,14 +68,23 @@ At minimum, an equivalent custom deployment role must allow:
 - `Microsoft.Authorization/roleAssignments/write` and `Microsoft.Authorization/roleAssignments/delete` at each storage-account and ACR scope; and
 - read access to every existing resource referenced by the brownfield profile.
 
-The existing-resource profile also executes nested deployments in the resource groups containing the two storage accounts and ACR. The deployment principal therefore needs resource-group deployment permission in those resource groups and role-assignment permission on all three target resources. The current template accepts resource-group names but not subscription IDs, so the workload, storage accounts, network resources, private endpoints, Private DNS zones, and ACR must be in the same subscription.
+The existing-resource profile also executes nested deployments in the resource groups containing the reused storage accounts and ACR, in the resource group of a VNet that gets a new job subnet, and in every resource group that receives resources it creates. The deployment principal therefore needs resource-group deployment permission in those resource groups and role-assignment permission on the target resources. The current template accepts resource-group names but not subscription IDs, so the workload and every reused storage account, network resource, private endpoint, and ACR must be in the same subscription. Private DNS zones named by resource ID can be in another subscription.
+
+When the existing-resource profile creates services, it places each one in its own resource group parameter or else in its region's resource group, and it places the private endpoints it creates in the endpoint resource group of their VNet. A new VNet's split-horizon zones go in their own DNS resource groups. The deployment creates each of these resource groups unless it's listed in `existingResourceGroups`; see the [README](../README.md#choose-the-resource-groups). The principal also needs:
+
+- `Microsoft.Network/virtualNetworks/subnets/join/action` on each endpoint subnet, and on each existing job subnet that gets a Container Apps environment;
+- subnet write access on a VNet in `newSubnet` mode;
+- Private DNS Zone Contributor on the zones that receive the new endpoints' records; and
+- `privateEndpointConnectionsApproval/action` on reused storage accounts and registries that get new endpoints. The template requests automatic approval, so without this right the endpoint creation fails with `LinkedAuthorizationFailed` instead of waiting for approval.
+
+The README's [troubleshooting section](../README.md#deployment-errors) maps the resulting authorization errors to the missing rights.
 
 ### Deployment script and ACR
 
 `scripts/deploy.ps1` can either consume a prebuilt digest-pinned image or run an ACR Task build and inspect its manifest:
 
-- With `-ContainerImage`, no image build or manifest lookup is performed. The deployment principal still needs the management-plane and role-assignment permissions above.
-- Without `-ContainerImage`, the principal must be able to queue an ACR Task build, push the resulting image, and read repository manifest metadata. For a registry that does not use repository-scoped ABAC, assign AcrPush on the registry in addition to the required management-plane access. Network access to the private registry must also be available from the command environment.
+- With `-ContainerImage`, no image build or manifest lookup is performed, and a registry that the templates create stays closed to public network access in both deployment stages. The deployment principal still needs the management-plane and role-assignment permissions above.
+- Without `-ContainerImage`, the principal must be able to queue an ACR Task build, push the resulting image, and read repository manifest metadata. For a registry that does not use repository-scoped ABAC, assign AcrPush on the registry in addition to the required management-plane access. Network access to the private registry must also be available from the command environment. A registry that the templates create is opened to public network access for the bootstrap deployment and the build, and closed again by the final deployment.
 
 ### Operational access
 
@@ -90,7 +105,12 @@ After deployment, resolve the two job identity principal IDs and verify that eac
 
 ```powershell
 az identity list --resource-group <replication-resource-group> --query "[].{name:name, principalId:principalId}" --output table
+az identity list --resource-group <secondary-resource-group> --query "[].{name:name, principalId:principalId}" --output table
+```
 
+The second command is needed only when the existing-resource profile uses a separate `secondaryResourceGroupName`.
+
+```powershell
 az role assignment list --scope "/subscriptions/<subscription-id>/resourceGroups/<primary-storage-rg>/providers/Microsoft.Storage/storageAccounts/<primary-storage-account>" --include-inherited --output table
 az role assignment list --scope "/subscriptions/<subscription-id>/resourceGroups/<secondary-storage-rg>/providers/Microsoft.Storage/storageAccounts/<secondary-storage-account>" --include-inherited --output table
 az role assignment list --scope "/subscriptions/<subscription-id>/resourceGroups/<acr-rg>/providers/Microsoft.ContainerRegistry/registries/<acr-name>" --include-inherited --output table
@@ -115,6 +135,7 @@ Job failure and replication freshness are separate signals:
 
 - Each Container Apps Job has a Sev 1 metric alert over the native `Executions` metric filtered to `state=Failed`. Both rules remain enabled so a failed manual execution in the standby region is observable.
 - Each Log Analytics workspace has a Sev 2 scheduled query rule that runs every 10 minutes and searches the configured 20-, 30-, or 60-minute window for `AZURE_FILES_REPLICATION_SUCCEEDED`. A single evaluation with no success marker triggers the alert.
+- The freshness query embeds the deployment time and treats the active direction as fresh until one lag threshold after it, so a newly activated direction has time to run and ingest its first success. Any redeployment delays stale detection by at most one threshold.
 - Scheduled-query validation is skipped when the alert resources are created because a new workspace does not contain `ContainerAppConsoleLogs_CL` until its first Container Apps log ingestion. Runtime evaluation uses the table normally after it is materialized.
 - Freshness represents elapsed time since the last completed successful AzCopy run. It does not compare individual file timestamps or guarantee a per-file RPO.
 - All rules use stateful auto-mitigation and notify the same email Action Group with Common Alert Schema.

@@ -200,6 +200,137 @@ try {
     Assert-True ((Get-Status $report 'primary job copy path*') -contains 'Action required') 'a hub-only primary copy path was accepted'
     Assert-True ((Get-Status $report 'secondary job copy path*') -contains 'Action required') 'a hub-only secondary copy path was accepted'
 
+    # Workload profiles environments accept an existing delegated subnet down to /27.
+    $subnetRules = @(
+        (New-Rule 'network vnet subnet show --resource-group rg-network-primary *' @{ addressPrefix = '10.1.4.0/26'; delegations = @(@{ serviceName = 'Microsoft.App/environments' }); serviceAssociationLinks = @() }),
+        (New-Rule 'network vnet subnet show --resource-group rg-network-secondary *' @{ addressPrefix = '10.2.4.0/28'; delegations = @(@{ serviceName = 'Microsoft.App/environments' }); serviceAssociationLinks = @() })
+    )
+    $fakeAzRules = $commonRules + $subnetRules + (Get-ExistingRules -PrimaryEndpoints @('pe-primary-file-a', 'pe-primary-file-b') -SecondaryEndpoints @('pe-secondary-file-a', 'pe-secondary-file-b'))
+    $report = Invoke-Inventory $parametersFile
+    Assert-True ((Get-Status $report 'primary Container Apps subnet snet-jobs') -contains 'Ready') 'a delegated /26 subnet was not accepted'
+    Assert-True ((Get-Status $report 'secondary Container Apps subnet snet-jobs') -contains 'Action required') 'a delegated /28 subnet was accepted'
+
+    # Reuse or create: a new secondary account, VNet, and registry, plus a new job subnet in the existing primary VNet.
+    $hybridParametersFile = Join-Path $workRoot 'hybrid.test.bicepparam'
+    $vnetPrimary = "$subscription/resourceGroups/rg-network-primary/providers/Microsoft.Network/virtualNetworks/vnet-primary"
+    function Set-HybridParameters([string]$SubnetPrefix) {
+        @"
+using './existing.bicep'
+
+param resourceGroupName = 'rg-replication-test'
+param resourceGroupLocation = 'westus2'
+param primaryLocation = 'westus2'
+param secondaryLocation = 'northcentralus'
+param primaryRegionCode = 'pri'
+param secondaryRegionCode = 'sec'
+param primaryStorageAccountName = 'stprimarytest'
+param primaryStorageResourceGroupName = 'rg-storage-primary'
+param primaryFileShareName = 'share'
+param secondaryStorageMode = 'new'
+param secondaryStorageAccountName = 'stnewsecondary'
+param primaryNetworkMode = 'newSubnet'
+param primaryVnetName = 'vnet-primary'
+param primaryVnetResourceGroupName = 'rg-network-primary'
+param primaryInfrastructureSubnetPrefix = '$SubnetPrefix'
+param primaryPrivateEndpointSubnetName = 'snet-endpoints'
+param primaryFileDnsZoneId = '$subscription/resourceGroups/rg-dns-primary/providers/Microsoft.Network/privateDnsZones/privatelink.file.core.windows.net'
+param secondaryNetworkMode = 'new'
+param registryMode = 'new'
+param alertEmailAddresses = ['alerts@replication.test']
+"@ | Set-Content -LiteralPath $hybridParametersFile -Encoding utf8
+    }
+    function Get-HybridRules([bool]$NameAvailable) {
+        @(
+            (New-Rule 'network vnet show --resource-group rg-network-primary*' @{
+                id = $vnetPrimary; location = 'westus2'; dhcpOptions = @{ dnsServers = @() }; virtualNetworkPeerings = @()
+                addressSpace = @{ addressPrefixes = @('10.1.0.0/16') }
+                subnets = @(@{ name = 'snet-jobs-in-use'; addressPrefix = '10.1.0.0/23' }, @{ name = 'snet-endpoints'; addressPrefix = '10.1.2.0/24'; delegations = @() })
+            }),
+            (New-Rule 'storage account check-name --name stnewsecondary*' @{ nameAvailable = $NameAvailable; message = 'The storage account named stnewsecondary is already taken.' }),
+            (New-Rule 'rest --method get --url *Microsoft.Storage/skus*' @{ value = @(@{ name = 'Standard_LRS'; kind = 'StorageV2'; locations = @('northcentralus'); restrictions = @() }) }),
+            (New-Rule 'network vnet list*' @(@{ name = 'vnet-primary'; addressSpace = @{ addressPrefixes = @('10.1.0.0/16') } })),
+            (New-Rule "network private-dns link vnet list --subscription 00000000-0000-0000-0000-000000000000 --resource-group rg-dns-primary --zone-name privatelink.file.core.windows.net *" @(@{ virtualNetwork = @{ id = $vnetPrimary } }))
+        )
+    }
+
+    Set-HybridParameters '10.1.4.0/23'
+    $fakeAzRules = $commonRules + (Get-HybridRules $true) + (Get-ExistingRules -PrimaryEndpoints @('pe-primary-file-a', 'pe-primary-file-b') -SecondaryEndpoints @())
+    $report = Invoke-Inventory $hybridParametersFile
+    Assert-True ((Get-Status $report 'secondary account stnewsecondary') -contains 'To be created') 'a new storage account was not reported as to be created'
+    Assert-True ((Get-Status $report 'Standard_LRS in northcentralus') -contains 'Ready') 'the new account SKU was not checked'
+    Assert-True ((Get-Status $report 'primary Container Apps subnet snet-replication-jobs (new)') -contains 'To be created') 'a free subnet prefix was not accepted'
+    Assert-True ((Get-Status $report 'primary endpoint subnet snet-endpoints') -contains 'To be created') 'the endpoint subnet for new endpoints was not checked'
+    Assert-True ((Get-Status $report 'primary file DNS zone for new endpoints') -contains 'Ready') 'a linked DNS zone for new endpoints was not accepted'
+    Assert-True ((Get-Status $report 'primary registry DNS zone for new endpoints') -contains 'Warning') 'a missing registry DNS zone was not flagged'
+    Assert-True ((Get-Status $report 'secondary VNet vnet-replication-sec (new)') -contains 'To be created') 'a new VNet was not reported as to be created'
+    Assert-True ((Get-Status $report 'Registry (new)') -contains 'To be created') 'a new registry was not reported as to be created'
+    Assert-True ((Get-Status $report 'primary job copy path*') -contains 'Ready') 'an existing source endpoint plus a created destination endpoint was not accepted'
+    Assert-True ((Get-Status $report 'secondary job copy path*') -contains 'Ready') 'endpoints created in a new VNet were not accepted'
+    Assert-True ((Get-Status $report '*job registry path') -notcontains 'Action required') 'endpoints created for a new registry were not accepted'
+    Assert-True ($report.Summary.PrerequisitesActionRequired -eq 0) "unexpected hybrid action items: $(@($report.Prerequisites | Where-Object Status -eq 'Action required' | ForEach-Object Item) -join '; ')"
+
+    Set-HybridParameters '10.1.2.0/25'
+    $fakeAzRules = $commonRules + (Get-HybridRules $false) + (Get-ExistingRules -PrimaryEndpoints @('pe-primary-file-a', 'pe-primary-file-b') -SecondaryEndpoints @())
+    $report = Invoke-Inventory $hybridParametersFile
+    Assert-True ((Get-Status $report 'primary Container Apps subnet snet-replication-jobs (new)') -contains 'Action required') 'an overlapping subnet prefix was accepted'
+    Assert-True ((Get-Status $report 'secondary account stnewsecondary') -contains 'Action required') 'an unavailable storage account name was accepted'
+
+    # Resource group layout: new services in their own groups, listed existing groups, and custom names.
+    $layoutParametersFile = Join-Path $workRoot 'layout.test.bicepparam'
+    @"
+using './existing.bicep'
+
+param resourceGroupName = 'rg-replication-test'
+param resourceGroupLocation = 'westus2'
+param secondaryResourceGroupName = 'rg-replication-sec'
+param existingResourceGroups = ['rg-shared', 'rg-missing']
+param primaryLocation = 'westus2'
+param secondaryLocation = 'northcentralus'
+param primaryRegionCode = 'pri'
+param secondaryRegionCode = 'PRI'
+param primaryStorageMode = 'new'
+param primaryStorageAccountName = 'stnewprimary'
+param primaryStorageResourceGroupName = 'rg-shared'
+param secondaryStorageMode = 'new'
+param secondaryStorageResourceGroupName = 'rg-missing'
+param primaryNetworkMode = 'new'
+param primaryDnsResourceGroupName = 'rg-dns'
+param secondaryNetworkMode = 'new'
+param secondaryDnsResourceGroupName = 'RG-DNS'
+param registryMode = 'new'
+param registryResourceGroupName = 'rg-foreign'
+param resourceNames = {
+  primaryJob: 'Job--Invalid'
+  secondaryJob: 'job-sync-secondary'
+}
+param alertEmailAddresses = ['alerts@replication.test']
+"@ | Set-Content -LiteralPath $layoutParametersFile -Encoding utf8
+    $fakeAzRules = $commonRules + @(
+        (New-Rule 'group show --name rg-shared *' @{ name = 'rg-shared'; tags = @{} }),
+        (New-Rule 'group show --name rg-foreign *' @{ name = 'rg-foreign'; tags = @{ Owner = 'another-team' } }),
+        (New-Rule 'group show --name rg-dns *' @{ name = 'rg-dns' }),
+        (New-Rule 'group show --name rg-replication-test *' @{ name = 'rg-replication-test'; tags = @{ Workload = 'azure-files-dr-replication' } }),
+        (New-Rule 'network private-dns zone list --resource-group rg-dns *' @(@{ name = 'privatelink.blob.core.windows.net'; tags = @{} })),
+        (New-Rule 'storage account show --name stnewprimary --resource-group rg-shared *' @{ name = 'stnewprimary' }),
+        (New-Rule 'rest --method get --url *Microsoft.Storage/skus*' @{ value = @(@{ name = 'Standard_LRS'; kind = 'StorageV2'; locations = @('westus2', 'northcentralus'); restrictions = @() }) })
+    )
+    $report = Invoke-Inventory $layoutParametersFile
+    Assert-True ((Get-Status $report 'Resource group rg-shared') -contains 'Ready') 'a listed existing resource group was not accepted'
+    Assert-True ((Get-Status $report 'Resource group rg-missing') -contains 'Action required') 'a listed resource group that does not exist was accepted'
+    Assert-True ((Get-Status $report 'Resource group rg-foreign') -contains 'Warning') 'an unlisted existing resource group was not flagged'
+    Assert-True ((Get-Status $report 'Resource group rg-replication-test') -contains 'Ready') 'a resource group created by an earlier deployment was not accepted'
+    Assert-True ((Get-Status $report 'Resource group rg-replication-sec') -contains 'To be created') 'a new secondary resource group was not reported as to be created'
+    Assert-True (@(Get-Status $report 'Resource group *').Count -eq 6) "resource groups were not deduplicated: $(@($report.Prerequisites | Where-Object Item -like 'Resource group *' | ForEach-Object Item) -join '; ')"
+    Assert-True ((Get-Status $report 'DNS resource group rg-dns') -contains 'Action required') 'a shared DNS resource group for two new VNets was accepted'
+    Assert-True ((Get-Status $report 'primary DNS resource group rg-dns') -contains 'Warning') 'foreign private DNS zones in the DNS resource group were not flagged'
+    Assert-True ((Get-Status $report 'Region codes') -contains 'Action required') 'identical region codes were accepted'
+    Assert-True ((Get-Status $report "resourceNames.primaryJob 'Job--Invalid'") -contains 'Action required') 'an invalid custom job name was accepted'
+    Assert-True (@(Get-Status $report 'resourceNames.secondaryJob*').Count -eq 0) 'a valid custom job name was flagged'
+    Assert-True ((Get-Status $report 'primary account stnewprimary') -contains 'Ready') 'a new account was not looked up in its own resource group'
+    $secondaryAccount = @($report.Prerequisites | Where-Object Item -eq 'secondary account (new)')
+    Assert-True ($secondaryAccount.Count -eq 1 -and $secondaryAccount[0].Status -eq 'To be created' -and $secondaryAccount[0].Detail -like '* in rg-missing.') 'a new account without a name was not placed in its resource group'
+    Assert-True ((Get-Status $report 'Registry (new)') -contains 'To be created') 'a new registry in a custom resource group was not reported as to be created'
+
     # A placeholder that an override replaces no longer blocks lookups and what-if.
     $placeholderFile = Join-Path $workRoot 'existing.placeholder.bicepparam'
     (Get-Content -LiteralPath $parametersFile -Raw) -replace "param containerImage = '[^']+'", "param containerImage = '<existing-acr-login-server>/<repository>@sha256:<digest>'" | Set-Content -LiteralPath $placeholderFile -Encoding utf8
@@ -210,8 +341,7 @@ try {
     Assert-True ((Get-Status $report 'existing.placeholder.bicepparam') -contains 'Ready') 'an overridden placeholder was still reported'
     Assert-True ((Get-Status $report 'containerImage') -contains 'Ready') 'the override image was not checked'
     $whatIfCall = Get-WhatIfCall
-    Assert-True ($whatIfCall -like "*--parameters containerImage=acrtest.azurecr.io/azure-files-dr-azcopy@sha256:$digest activeRegion=primary --result-format*") "what-if did not receive the existing-profile overrides: $whatIfCall"
-    Assert-True ($whatIfCall -notlike '*acrPublicNetworkAccess*') 'an override that existing.bicep does not declare was passed to what-if'
+    Assert-True ($whatIfCall -like "*--parameters containerImage=acrtest.azurecr.io/azure-files-dr-azcopy@sha256:$digest activeRegion=primary acrPublicNetworkAccess=Disabled --result-format*") "what-if did not receive the existing-profile overrides: $whatIfCall"
 } finally {
     Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

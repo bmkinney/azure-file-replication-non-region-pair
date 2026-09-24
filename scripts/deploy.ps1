@@ -1,6 +1,7 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [string]$Location = 'southcentralus',
+    # Template compiled as a pre-deployment check. Azure CLI deploys the template in the parameter file's using declaration.
     [string]$TemplateFile,
     [string]$ParametersFile = (Join-Path $PSScriptRoot '..\infra\main.bicepparam'),
     [string]$ImageContext = (Join-Path $PSScriptRoot '..\src\azcopy-job'),
@@ -15,6 +16,9 @@ $ErrorActionPreference = 'Stop'
 
 function Invoke-AzCli {
     param([Parameter(Mandatory)][string[]]$Arguments)
+
+    # -WhatIf would otherwise skip the stderr redirection and the temp-file cleanup below.
+    $WhatIfPreference = $false
 
     # Azure CLI writes warnings to stderr; keeping them out of stdout protects JSON parsing.
     $errorPath = [IO.Path]::GetTempFileName()
@@ -34,13 +38,22 @@ function Invoke-AzCli {
 
 $null = Invoke-AzCli -Arguments @('account', 'show', '--output', 'none')
 if ([string]::IsNullOrWhiteSpace($TemplateFile)) {
-    $parameterBaseName = [IO.Path]::GetFileNameWithoutExtension($ParametersFile)
-    $TemplateFile = Join-Path (Split-Path $ParametersFile) "$parameterBaseName.bicep"
+    # A .bicepparam file names its template in its using declaration, for example main.local.bicepparam.
+    $parametersDirectory = Split-Path -Parent $ParametersFile
+    if (-not $parametersDirectory) {
+        $parametersDirectory = '.'
+    }
+    $usingDeclaration = Select-String -LiteralPath $ParametersFile -Pattern "^\s*using\s+'([^']+)'" | Select-Object -First 1
+    $templateName = if ($usingDeclaration) {
+        $usingDeclaration.Matches[0].Groups[1].Value
+    } else {
+        "$([IO.Path]::GetFileNameWithoutExtension($ParametersFile)).bicep"
+    }
+    $TemplateFile = Join-Path $parametersDirectory $templateName
 }
 if (-not (Test-Path $TemplateFile -PathType Leaf)) {
     throw "Template file '$TemplateFile' was not found."
 }
-$isBrownfield = [IO.Path]::GetFileName($TemplateFile) -eq 'existing.bicep'
 $null = Invoke-AzCli -Arguments @('bicep', 'build', '--file', $templateFile, '--stdout')
 $null = Invoke-AzCli -Arguments @(
     'deployment', 'sub', 'validate',
@@ -65,10 +78,9 @@ if (-not $PSCmdlet.ShouldProcess('current subscription', 'Deploy the replication
     return
 }
 
-$bootstrapOverrides = @('activeRegion=none')
-if (-not $isBrownfield) {
-    $bootstrapOverrides += 'acrPublicNetworkAccess=Enabled'
-}
+# acrPublicNetworkAccess applies only to a registry the templates create; it's public only while the image is built.
+$bootstrapAccess = if ($ContainerImage) { 'Disabled' } else { 'Enabled' }
+$bootstrapOverrides = @('activeRegion=none', "acrPublicNetworkAccess=$bootstrapAccess")
 $bootstrapArguments = @(
     'deployment', 'sub', 'create',
     '--name', "azure-files-dr-bootstrap-$(Get-Date -Format 'yyyyMMddHHmmss')",
@@ -102,10 +114,7 @@ if ($ContainerImage) {
     $image = "${registryName}.azurecr.io/${ImageRepository}@$($digest.Trim())"
 }
 
-$finalOverrides = @("containerImage=$image", 'activeRegion=primary')
-if (-not $isBrownfield) {
-    $finalOverrides += 'acrPublicNetworkAccess=Disabled'
-}
+$finalOverrides = @("containerImage=$image", 'activeRegion=primary', 'acrPublicNetworkAccess=Disabled')
 $finalArguments = @(
     'deployment', 'sub', 'create',
     '--name', "azure-files-dr-final-$(Get-Date -Format 'yyyyMMddHHmmss')",
