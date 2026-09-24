@@ -31,6 +31,8 @@ var primaryIdentityName = 'id-replication-${primaryRegionCode}-${primaryToken}'
 var secondaryIdentityName = 'id-replication-${secondaryRegionCode}-${secondaryToken}'
 var sourceFileUrl = 'https://${primaryStorageAccountName}.file.${environment().suffixes.storage}/${primaryFileShareName}'
 var destinationFileUrl = 'https://${secondaryStorageAccountName}.file.${environment().suffixes.storage}/${secondaryFileShareName}'
+// Delegated infrastructure subnets require a workload profiles environment; the Consumption profile is serverless.
+var workloadProfileName = 'Consumption'
 
 resource primaryStorage 'Microsoft.Storage/storageAccounts@2025-01-01' existing = {
   name: primaryStorageAccountName
@@ -144,6 +146,12 @@ resource primaryEnvironment 'Microsoft.App/managedEnvironments@2025-01-01' = {
       infrastructureSubnetId: primaryInfrastructureSubnet.id
       internal: true
     }
+    workloadProfiles: [
+      {
+        name: workloadProfileName
+        workloadProfileType: 'Consumption'
+      }
+    ]
     zoneRedundant: false
   }
 }
@@ -164,6 +172,12 @@ resource secondaryEnvironment 'Microsoft.App/managedEnvironments@2025-01-01' = {
       infrastructureSubnetId: secondaryInfrastructureSubnet.id
       internal: true
     }
+    workloadProfiles: [
+      {
+        name: workloadProfileName
+        workloadProfileType: 'Consumption'
+      }
+    ]
     zoneRedundant: false
   }
 }
@@ -227,6 +241,7 @@ resource primaryJob 'Microsoft.App/jobs@2025-01-01' = {
   }
   properties: {
     environmentId: primaryEnvironment.id
+    workloadProfileName: workloadProfileName
     configuration: primaryJobConfiguration
     template: {
       containers: [{
@@ -259,6 +274,7 @@ resource secondaryJob 'Microsoft.App/jobs@2025-01-01' = {
   }
   properties: {
     environmentId: secondaryEnvironment.id
+    workloadProfileName: workloadProfileName
     configuration: secondaryJobConfiguration
     template: {
       containers: [{

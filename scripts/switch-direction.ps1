@@ -19,6 +19,9 @@ $ErrorActionPreference = 'Stop'
 function Invoke-AzCli {
     param([Parameter(Mandatory)][string[]]$Arguments)
 
+    # -WhatIf would otherwise skip the stderr redirection and the temp-file cleanup below.
+    $WhatIfPreference = $false
+
     # Azure CLI writes warnings to stderr; keeping them out of stdout protects JSON parsing.
     $errorPath = [IO.Path]::GetTempFileName()
     try {
@@ -39,8 +42,18 @@ if (-not $WritesFenced) {
     throw 'WritesFenced is required. Stop application writes before changing replication direction.'
 }
 if ([string]::IsNullOrWhiteSpace($TemplateFile)) {
-    $parameterBaseName = [IO.Path]::GetFileNameWithoutExtension($ParametersFile)
-    $TemplateFile = Join-Path (Split-Path $ParametersFile) "$parameterBaseName.bicep"
+    # A .bicepparam file names its template in its using declaration, for example main.local.bicepparam.
+    $parametersDirectory = Split-Path -Parent $ParametersFile
+    if (-not $parametersDirectory) {
+        $parametersDirectory = '.'
+    }
+    $usingDeclaration = Select-String -LiteralPath $ParametersFile -Pattern "^\s*using\s+'([^']+)'" | Select-Object -First 1
+    $templateName = if ($usingDeclaration) {
+        $usingDeclaration.Matches[0].Groups[1].Value
+    } else {
+        "$([IO.Path]::GetFileNameWithoutExtension($ParametersFile)).bicep"
+    }
+    $TemplateFile = Join-Path $parametersDirectory $templateName
 }
 if (-not (Test-Path $TemplateFile -PathType Leaf)) {
     throw "Template file '$TemplateFile' was not found."

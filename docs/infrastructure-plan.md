@@ -13,7 +13,7 @@ Deploy private, active/passive Azure Files replication across two selected Azure
 - One Azure Files account/share and one blob account/container per region.
 - Each VNet has Azure Files private endpoints for both file accounts.
 - Each VNet has its own same-named Private DNS zone instance. This split-horizon design prevents an unpeered VNet from resolving the other region's unreachable private endpoint address.
-- One internal Container Apps environment and AzCopy job per region. Environment zone redundancy is disabled to reduce regional capacity requirements; resilience is provided by the independent regional workers.
+- One internal Container Apps environment and AzCopy job per region. Each environment is a workload profiles environment on its delegated subnet and runs the job on the serverless Consumption profile. Environment zone redundancy is disabled to reduce regional capacity requirements; resilience is provided by the independent regional workers.
 - The greenfield profile uses ZRS for primary storage and LRS for secondary storage. Confirm those SKUs are available in the selected regions before deployment.
 - A Premium ACR in the primary region with geo-replication to the secondary region and a private endpoint in each VNet.
 - Regional Log Analytics workspaces.

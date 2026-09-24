@@ -85,7 +85,7 @@ The existing-resource profile is additive. It does not redeploy or change the su
 - PowerShell 7 when using `scripts/deploy.ps1`; direct Bicep deployment needs only Azure CLI.
 - Sufficient Premium ACR, Container Apps environment, private endpoint, and regional storage quota.
 - For the existing-resource profile, an existing ACR that both job subnets can reach (Premium when reached through private endpoints) and a digest-pinned AzCopy job image in that ACR.
-- One dedicated, empty Container Apps infrastructure subnet of at least `/23`, delegated to `Microsoft.App/environments`, in each region.
+- One dedicated, empty Container Apps infrastructure subnet of at least `/23`, delegated to `Microsoft.App/environments`, in each region. The templates create workload profiles environments that run the jobs on the serverless Consumption profile, and this environment type requires the delegation.
 - A network path that supports server-side copy between the two private storage accounts. See [Network requirements for server-side copy](#network-requirements-for-server-side-copy).
 
 Review the active subscription before deployment:
@@ -110,7 +110,7 @@ pwsh ./scripts/inventory.ps1 -ParametersFile ./infra/existing.bicepparam -Output
 The report contains two tables:
 
 - **Prerequisites** lists placeholder parameters, resource provider registration, and Container Apps availability in both regions. For the greenfield profile, it also checks storage SKU availability. For the existing-resource profile, it checks the storage accounts and shares, the VNets and delegated subnets, the registry and digest-pinned image, the [server-side copy network layout](#network-requirements-for-server-side-copy), the private DNS records for the file endpoints, and registry reachability. Each item is `Ready`, `Action required`, `Warning`, or `Not verified`.
-- **Template resources** lists every resource from `az deployment sub what-if` as `Exists`, `Exists, will be updated`, `To be provisioned`, or `Exists, not managed by this template`.
+- **Template resources** lists every resource from `az deployment sub what-if` as `To be provisioned`, `Exists, will be redeployed`, or `Exists, not managed by this template`. The inventory requests resource IDs only, so it reports whether each resource exists but doesn't compare properties. To review property-level differences, run `az deployment sub what-if` with the same parameter file.
 
 Resource lookups need Reader access. What-if needs deployment permissions; use `-SkipWhatIf` to omit it. Resolve every `Action required` item before deploying.
 
@@ -314,7 +314,9 @@ az deployment sub validate --location southcentralus --parameters infra/main.bic
 az deployment sub what-if --location southcentralus --parameters infra/main.bicepparam
 pwsh ./scripts/inventory.ps1
 pwsh ./tests/test-monitoring-template.ps1
+pwsh ./tests/test-foundation-templates.ps1
 pwsh ./tests/test-inventory.ps1
+pwsh ./tests/test-deployment-scripts.ps1
 pwsh ./src/azcopy-job/test-run-sync.ps1
 ```
 
@@ -322,10 +324,19 @@ pwsh ./src/azcopy-job/test-run-sync.ps1
 
 The script validates and previews changes, creates the private foundation, builds AzCopy in ACR, pins the deployed image by digest, disables ACR public access, and activates the primary schedule.
 
+Keep environment-specific values, such as the alert email address, in a local parameter file that Git ignores. Files that match `infra/*.local.bicepparam` are ignored:
+
 ```powershell
-pwsh ./scripts/deploy.ps1 -WhatIf
-pwsh ./scripts/deploy.ps1
+Copy-Item ./infra/main.bicepparam ./infra/main.local.bicepparam
+# Set alertEmailAddresses, and optionally the regions and resource group names, in infra/main.local.bicepparam.
+pwsh ./scripts/inventory.ps1 -ParametersFile ./infra/main.local.bicepparam
+pwsh ./scripts/deploy.ps1 -ParametersFile ./infra/main.local.bicepparam -WhatIf
+pwsh ./scripts/deploy.ps1 -ParametersFile ./infra/main.local.bicepparam
 ```
+
+`deploy.ps1` and `switch-direction.ps1` find the template from the parameter file's `using` declaration, so `-TemplateFile` is needed only for a parameter file without one.
+
+After the deployment succeeds, set `activeRegion = 'primary'`, `acrPublicNetworkAccess = 'Disabled'`, and `containerImage` to the pinned image that the script prints in your local parameter file. Later inventory and what-if runs then reflect the deployed state, and a direct `az deployment sub create` with that file doesn't revert the jobs to the bootstrap image. Pass the same file to `switch-direction.ps1` with `-ParametersFile`.
 
 Deployment changes Azure resources and is intentionally not run automatically from this repository.
 

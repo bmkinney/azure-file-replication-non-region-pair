@@ -30,6 +30,8 @@ var fileDataRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/r
 var acrPullRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '7f951dda-4ed3-4680-a7ca-43fe172d538d')
 var sourceFileUrl = 'https://${primaryFileStorageName}.file.${environment().suffixes.storage}/${primaryFileShareName}'
 var destinationFileUrl = 'https://${secondaryFileStorageName}.file.${environment().suffixes.storage}/${secondaryFileShareName}'
+// Delegated infrastructure subnets require a workload profiles environment; the Consumption profile is serverless.
+var workloadProfileName = 'Consumption'
 
 resource primaryVnet 'Microsoft.Network/virtualNetworks@2024-10-01' = {
   name: primaryVnetName
@@ -523,6 +525,12 @@ resource primaryEnvironment 'Microsoft.App/managedEnvironments@2025-01-01' = {
       infrastructureSubnetId: primaryDefaultSubnet.id
       internal: true
     }
+    workloadProfiles: [
+      {
+        name: workloadProfileName
+        workloadProfileType: 'Consumption'
+      }
+    ]
     zoneRedundant: false
   }
 }
@@ -542,6 +550,12 @@ resource secondaryEnvironment 'Microsoft.App/managedEnvironments@2025-01-01' = {
       infrastructureSubnetId: secondaryDefaultSubnet.id
       internal: true
     }
+    workloadProfiles: [
+      {
+        name: workloadProfileName
+        workloadProfileType: 'Consumption'
+      }
+    ]
     zoneRedundant: false
   }
 }
@@ -605,6 +619,7 @@ resource primaryJob 'Microsoft.App/jobs@2025-01-01' = {
   }
   properties: {
     environmentId: primaryEnvironment.id
+    workloadProfileName: workloadProfileName
     configuration: primaryJobConfiguration
     template: {
       containers: [{
@@ -643,6 +658,7 @@ resource secondaryJob 'Microsoft.App/jobs@2025-01-01' = {
   }
   properties: {
     environmentId: secondaryEnvironment.id
+    workloadProfileName: workloadProfileName
     configuration: secondaryJobConfiguration
     template: {
       containers: [{
