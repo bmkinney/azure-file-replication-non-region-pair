@@ -19,7 +19,11 @@ Deploy private, active/passive Azure Files replication across two selected Azure
 - Regional Log Analytics workspaces.
 - One shared Azure Monitor email Action Group, two job-failure metric alerts, and one freshness query alert per regional workspace.
 
-The existing-resource profile keeps this topology but reuses what already exists. For each storage account and share, regional network, and the registry, a mode parameter either reuses the service or creates it as the greenfield profile would. A new VNet gets its own split-horizon zones. `newSubnet` adds only a delegated job subnet to an existing VNet. Private endpoints are created for every new service and in every new VNet, which keeps the local-endpoint layout below for them. Every resource that the deployment creates can take a custom name, and it can go in one resource group, one per region, or one per service. See the [README](../README.md#reuse-or-create-each-service).
+The existing-resource profile keeps this topology but reuses what already exists. For each storage account and share, regional network, and the registry, a mode parameter either reuses the service or creates it as the greenfield profile would. A new VNet gets its own split-horizon zones. `newSubnet` adds only a delegated job subnet to an existing VNet. Private endpoints are created for every new service and in every new VNet, which keeps the local-endpoint layout below for them. The exception is an existing registry that the jobs reach through its public endpoint, with `registryPrivateEndpointsEnabled = false`, which gets no endpoints.
+
+Most resources that the deployment creates can take custom names. Each region's compute, which is its identity, Log Analytics workspace, Container Apps environment, and job, goes in that region's resource group; both regions can share one group. Monitoring goes with the primary region's compute. New storage accounts, VNets, the registry, private endpoints, and private DNS zones can each go in a resource group of their own. See [Reuse or create each service](../README.md#reuse-or-create-each-service) and [Customize the parameter file](../README.md#customize-the-parameter-file) in the README.
+
+Container Apps environments on a VNet are workload profiles environments, which need a subnet of at least `/27` delegated to `Microsoft.App/environments`. The greenfield profile and new VNets use a `/23` job subnet.
 
 ### Server-side copy requirement
 
@@ -68,17 +72,19 @@ The existing-resource profile also executes nested deployments in the resource g
 
 When the existing-resource profile creates services, it places each one in its own resource group parameter or else in its region's resource group, and it places the private endpoints it creates in the endpoint resource group of their VNet. A new VNet's split-horizon zones go in their own DNS resource groups. The deployment creates each of these resource groups unless it's listed in `existingResourceGroups`; see the [README](../README.md#choose-the-resource-groups). The principal also needs:
 
-- `Microsoft.Network/virtualNetworks/subnets/join/action` on each endpoint subnet;
+- `Microsoft.Network/virtualNetworks/subnets/join/action` on each endpoint subnet, and on each existing job subnet that gets a Container Apps environment;
 - subnet write access on a VNet in `newSubnet` mode;
 - Private DNS Zone Contributor on the zones that receive the new endpoints' records; and
-- private endpoint connection approval on reused storage accounts and registries that get new endpoints. Without approval rights, the connections stay pending until the resource owner approves them.
+- `privateEndpointConnectionsApproval/action` on reused storage accounts and registries that get new endpoints. The template requests automatic approval, so without this right the endpoint creation fails with `LinkedAuthorizationFailed` instead of waiting for approval.
+
+The README's [troubleshooting section](../README.md#deployment-errors) maps the resulting authorization errors to the missing rights.
 
 ### Deployment script and ACR
 
 `scripts/deploy.ps1` can either consume a prebuilt digest-pinned image or run an ACR Task build and inspect its manifest:
 
-- With `-ContainerImage`, no image build or manifest lookup is performed. The deployment principal still needs the management-plane and role-assignment permissions above.
-- Without `-ContainerImage`, the principal must be able to queue an ACR Task build, push the resulting image, and read repository manifest metadata. For a registry that does not use repository-scoped ABAC, assign AcrPush on the registry in addition to the required management-plane access. Network access to the private registry must also be available from the command environment.
+- With `-ContainerImage`, no image build or manifest lookup is performed, and a registry that the templates create stays closed to public network access in both deployment stages. The deployment principal still needs the management-plane and role-assignment permissions above.
+- Without `-ContainerImage`, the principal must be able to queue an ACR Task build, push the resulting image, and read repository manifest metadata. For a registry that does not use repository-scoped ABAC, assign AcrPush on the registry in addition to the required management-plane access. Network access to the private registry must also be available from the command environment. A registry that the templates create is opened to public network access for the bootstrap deployment and the build, and closed again by the final deployment.
 
 ### Operational access
 

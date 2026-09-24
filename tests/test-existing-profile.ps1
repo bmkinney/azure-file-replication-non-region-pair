@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 
-# Compiles infra/existing.bicep and sample parameter files to check the reuse-or-create, naming, and placement contract; no Azure calls are made.
+# Compiles infra/existing.bicep, sample parameter files, and the README examples to check the reuse-or-create, naming, and placement contract; no Azure calls are made.
 
 $repositoryRoot = Split-Path $PSScriptRoot -Parent
 
@@ -154,6 +154,14 @@ param resourceNames = {
     Assert-True (Test-Compiles 'service' $perService) 'a per-service layout with custom names does not compile'
     Assert-True (-not (Test-Compiles 'unknown-name' ($perService -replace 'actionGroup:', 'actionGrop:'))) 'an unknown resourceNames key was accepted'
     Assert-True (-not (Test-Compiles 'unknown-target' "$base`nparam primaryEndpointsToCreate = ['firewall']")) 'an unknown endpoint target was accepted'
+
+    # The complete parameter files in README.md must compile, so the documented examples can't drift from the template.
+    $readme = [IO.File]::ReadAllText((Join-Path $repositoryRoot 'README.md'))
+    $examples = @([regex]::Matches($readme, '(?ms)^```bicep\r?\n(using ''\./existing\.bicep''.*?)^```') | ForEach-Object { $_.Groups[1].Value })
+    Assert-True ($examples.Count -ge 4) "expected at least four complete README parameter files, found $($examples.Count)"
+    for ($index = 0; $index -lt $examples.Count; $index++) {
+        Assert-True (Test-Compiles "readme-example-$index" $examples[$index]) "README parameter file example $($index + 1) does not compile"
+    }
 } finally {
     Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

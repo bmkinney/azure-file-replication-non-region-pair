@@ -382,8 +382,6 @@ function Get-SubnetAssessment($Subnet) {
     if ($controls) {
         $detail += ", $($controls -join ', ') (allow HTTPS to the storage and registry endpoints)"
     }
-    $sizeNote = if ($null -ne $prefixLength -and $prefixLength -gt 23) { ' It is smaller than the documented /23.' } else { '' }
-
     if ($inUse) {
         $environmentName = $environmentsBySubnet[(ConvertTo-Key $Subnet.id)]
         $user = if ($environmentName) { "Container Apps environment $environmentName" } else { 'existing resources' }
@@ -393,9 +391,9 @@ function Get-SubnetAssessment($Subnet) {
         return [pscustomobject]@{ Name = $name; Status = 'Not suitable'; Detail = "$detail. Workload profiles environments need at least a /27 subnet." }
     }
     if (-not $isAppDelegated) {
-        return [pscustomobject]@{ Name = $name; Status = 'Needs changes'; Detail = "$detail, empty. Delegate it to Microsoft.App/environments to host a replication job.$sizeNote" }
+        return [pscustomobject]@{ Name = $name; Status = 'Needs changes'; Detail = "$detail, empty. Delegate it to Microsoft.App/environments to host a replication job." }
     }
-    return [pscustomobject]@{ Name = $name; Status = 'Reusable'; Detail = "$detail, delegated to Microsoft.App/environments, empty.$sizeNote" }
+    return [pscustomobject]@{ Name = $name; Status = 'Reusable'; Detail = "$detail, delegated to Microsoft.App/environments, empty." }
 }
 
 $supportedKinds = 'StorageV2', 'FileStorage', 'Storage'
@@ -625,8 +623,10 @@ $summary = [ordered]@{
 }
 Write-Host 'Summary' -ForegroundColor Cyan
 Write-Host ("Services: {0} reusable, {1} need changes, {2} not suitable, {3} not verified." -f $summary.Reusable, $summary.NeedsChanges, $summary.NotSuitable, $summary.NotVerified)
-Write-Host 'Choose two VNets in different regions whose readiness rows show a job subnet, file endpoints that resolve for both storage accounts, and a registry endpoint.'
-Write-Host 'Record them in infra/existing.bicepparam, then validate the configuration with: pwsh ./scripts/inventory.ps1 -ParametersFile ./infra/existing.bicepparam'
+Write-Host 'Reuse a VNet in each region whose readiness row shows a job subnet, or let the deployment add a job subnet or create a VNet. The deployment can also create missing endpoints and services.'
+if (-not $ParametersOutputPath) {
+    Write-Host 'To write a parameter file from this audit, rerun with -PrimaryLocation, -SecondaryLocation, and -ParametersOutputPath ./infra/existing.bicepparam.'
+}
 Write-Host 'Endpoints and private DNS zones in other subscriptions are not audited.'
 
 if ($OutputPath) {

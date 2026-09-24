@@ -14,6 +14,7 @@ param(
 
     [string]$Location = 'southcentralus',
     [string]$ParametersFile = (Join-Path $PSScriptRoot '..\infra\main.bicepparam'),
+    # Checked for existence only. Azure CLI deploys the template in the parameter file's using declaration.
     [string]$TemplateFile
 )
 

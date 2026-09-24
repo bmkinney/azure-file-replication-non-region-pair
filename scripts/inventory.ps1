@@ -577,8 +577,8 @@ if ($isExistingProfile -and -not $hasPlaceholders) {
                     $subnetItem = "$role Container Apps subnet $subnetName"
                     if ($delegations -notcontains 'Microsoft.App/environments') {
                         Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'Action required' -Detail "Delegate the subnet to Microsoft.App/environments. prefix=$prefix"
-                    } elseif ($null -ne $prefixLength -and $prefixLength -gt 23) {
-                        Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'Warning' -Detail "prefix=$prefix is smaller than the documented /23."
+                    } elseif ($null -ne $prefixLength -and $prefixLength -gt 27) {
+                        Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'Action required' -Detail "prefix=$prefix is smaller than /27, the minimum for a workload profiles environment. Use another subnet, or set ${role}NetworkMode to newSubnet."
                     } elseif ($links.Count -gt 0) {
                         Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'Warning' -Detail "Already used by $($links -join ', '). Expected only when redeploying this solution."
                     } else {
@@ -619,8 +619,7 @@ if ($isExistingProfile -and -not $hasPlaceholders) {
                         } elseif ($conflicts.Count -gt 0) {
                             Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'Action required' -Detail "$prefix overlaps subnet $($conflicts -join ', ')."
                         } else {
-                            $sizeNote = if ($range.Length -gt 23) { ' It is smaller than the documented /23.' } else { '' }
-                            Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'To be created' -Detail "The deployment adds $subnetName ($prefix), delegated to Microsoft.App/environments, to $vnetName. Add it to any other IaC that manages this VNet so that a later deployment doesn't remove it.$sizeNote"
+                            Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'To be created' -Detail "The deployment adds $subnetName ($prefix), delegated to Microsoft.App/environments, to $vnetName. Add it to any other IaC that manages this VNet so that a later deployment doesn't remove it."
                         }
                     }
                 }

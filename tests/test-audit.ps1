@@ -174,7 +174,7 @@ Assert-True ($null -eq (Get-Row $report 'Storage account' 'stother')) 'a storage
 
 $null = Assert-Status $report 'Container Apps subnet' 'vnet-primary/snet-jobs' 'Reusable'
 $spare = Assert-Status $report 'Container Apps subnet' 'vnet-primary/snet-spare' 'Needs changes'
-Assert-True ($spare.Detail -like '*smaller than the documented /23*') 'a /26 candidate subnet was not flagged as smaller than /23'
+Assert-True ($spare.Detail -like '*Delegate it to Microsoft.App/environments*' -and $spare.Detail -notlike '*/23*') "a /26 candidate subnet wasn't reported as needing only the delegation: $($spare.Detail)"
 $used = Assert-Status $report 'Container Apps subnet' 'vnet-secondary/snet-used' 'Not suitable'
 Assert-True ($used.Detail -like '*cae-existing*') 'the environment using a subnet was not named'
 $null = Assert-Status $report 'Container Apps subnet' 'vnet-secondary/snet-tiny' 'Not suitable'

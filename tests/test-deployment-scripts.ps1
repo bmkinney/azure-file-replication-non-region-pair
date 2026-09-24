@@ -135,6 +135,15 @@ try {
     Assert-True ($creates[0] -like '*activeRegion=none acrPublicNetworkAccess=Enabled*') "the bootstrap deployment doesn't open the registry for the build: $($creates[0])"
     Assert-True ($creates[1] -like "*containerImage=acrtest.azurecr.io/azure-files-dr-azcopy@sha256:$digest activeRegion=primary acrPublicNetworkAccess=Disabled*") "the final deployment doesn't pin the image and close the registry: $($creates[1])"
 
+    # With a prebuilt image nothing is built, so the registry stays closed in both stages.
+    $prebuiltImage = "prebuilt.azurecr.io/azure-files-dr-azcopy@sha256:$digest"
+    Invoke-WithIsolatedTemp { & $deployScript -ParametersFile $parametersFile -ContainerImage $prebuiltImage -SkipWhatIf -Confirm:$false 6> $null }
+    $creates = @($azCalls | Where-Object { $_ -like 'deployment sub create*' })
+    Assert-True ($creates.Count -eq 2) "deploy.ps1 ran $($creates.Count) deployments with a prebuilt image"
+    Assert-True ($creates[0] -like '*activeRegion=none acrPublicNetworkAccess=Disabled*') "the bootstrap deployment opened the registry without a build: $($creates[0])"
+    Assert-True ($creates[1] -like "*containerImage=$prebuiltImage activeRegion=primary acrPublicNetworkAccess=Disabled*") "the final deployment doesn't use the prebuilt image: $($creates[1])"
+    Assert-True (@($azCalls | Where-Object { $_ -like 'acr *' }).Count -eq 0) "deploy.ps1 built or inspected an image although one was supplied: $($azCalls -join '; ')"
+
     $fakeAzRules = @(
         (New-Rule 'containerapp job list*' (ConvertTo-Json -InputObject $jobs -Depth 5 -Compress))
         (New-Rule 'containerapp job execution list*' '0')

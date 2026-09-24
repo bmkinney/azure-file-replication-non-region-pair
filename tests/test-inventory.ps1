@@ -178,6 +178,16 @@ try {
     Assert-True ((Get-Status $report 'primary job copy path*') -contains 'Action required') 'a hub-only primary copy path was accepted'
     Assert-True ((Get-Status $report 'secondary job copy path*') -contains 'Action required') 'a hub-only secondary copy path was accepted'
 
+    # Workload profiles environments accept an existing delegated subnet down to /27.
+    $subnetRules = @(
+        (New-Rule 'network vnet subnet show --resource-group rg-network-primary *' @{ addressPrefix = '10.1.4.0/26'; delegations = @(@{ serviceName = 'Microsoft.App/environments' }); serviceAssociationLinks = @() }),
+        (New-Rule 'network vnet subnet show --resource-group rg-network-secondary *' @{ addressPrefix = '10.2.4.0/28'; delegations = @(@{ serviceName = 'Microsoft.App/environments' }); serviceAssociationLinks = @() })
+    )
+    $fakeAzRules = $commonRules + $subnetRules + (Get-ExistingRules -PrimaryEndpoints @('pe-primary-file-a', 'pe-primary-file-b') -SecondaryEndpoints @('pe-secondary-file-a', 'pe-secondary-file-b'))
+    $report = Invoke-Inventory $parametersFile
+    Assert-True ((Get-Status $report 'primary Container Apps subnet snet-jobs') -contains 'Ready') 'a delegated /26 subnet was not accepted'
+    Assert-True ((Get-Status $report 'secondary Container Apps subnet snet-jobs') -contains 'Action required') 'a delegated /28 subnet was accepted'
+
     # Reuse or create: a new secondary account, VNet, and registry, plus a new job subnet in the existing primary VNet.
     $hybridParametersFile = Join-Path $workRoot 'hybrid.test.bicepparam'
     $vnetPrimary = "$subscription/resourceGroups/rg-network-primary/providers/Microsoft.Network/virtualNetworks/vnet-primary"

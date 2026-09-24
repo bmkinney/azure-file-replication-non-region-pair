@@ -1,6 +1,7 @@
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [string]$Location = 'southcentralus',
+    # Template compiled as a pre-deployment check. Azure CLI deploys the template in the parameter file's using declaration.
     [string]$TemplateFile,
     [string]$ParametersFile = (Join-Path $PSScriptRoot '..\infra\main.bicepparam'),
     [string]$ImageContext = (Join-Path $PSScriptRoot '..\src\azcopy-job'),
@@ -78,7 +79,8 @@ if (-not $PSCmdlet.ShouldProcess('current subscription', 'Deploy the replication
 }
 
 # acrPublicNetworkAccess applies only to a registry the templates create; it's public only while the image is built.
-$bootstrapOverrides = @('activeRegion=none', 'acrPublicNetworkAccess=Enabled')
+$bootstrapAccess = if ($ContainerImage) { 'Disabled' } else { 'Enabled' }
+$bootstrapOverrides = @('activeRegion=none', "acrPublicNetworkAccess=$bootstrapAccess")
 $bootstrapArguments = @(
     'deployment', 'sub', 'create',
     '--name', "azure-files-dr-bootstrap-$(Get-Date -Format 'yyyyMMddHHmmss')",
