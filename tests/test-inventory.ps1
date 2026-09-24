@@ -177,6 +177,71 @@ try {
     $report = Invoke-Inventory $parametersFile
     Assert-True ((Get-Status $report 'primary job copy path*') -contains 'Action required') 'a hub-only primary copy path was accepted'
     Assert-True ((Get-Status $report 'secondary job copy path*') -contains 'Action required') 'a hub-only secondary copy path was accepted'
+
+    # Reuse or create: a new secondary account, VNet, and registry, plus a new job subnet in the existing primary VNet.
+    $hybridParametersFile = Join-Path $workRoot 'hybrid.test.bicepparam'
+    $vnetPrimary = "$subscription/resourceGroups/rg-network-primary/providers/Microsoft.Network/virtualNetworks/vnet-primary"
+    function Set-HybridParameters([string]$SubnetPrefix) {
+        @"
+using './existing.bicep'
+
+param resourceGroupName = 'rg-replication-test'
+param resourceGroupLocation = 'westus2'
+param primaryLocation = 'westus2'
+param secondaryLocation = 'northcentralus'
+param primaryRegionCode = 'pri'
+param secondaryRegionCode = 'sec'
+param primaryStorageAccountName = 'stprimarytest'
+param primaryStorageResourceGroupName = 'rg-storage-primary'
+param primaryFileShareName = 'share'
+param secondaryStorageMode = 'new'
+param secondaryStorageAccountName = 'stnewsecondary'
+param primaryNetworkMode = 'newSubnet'
+param primaryVnetName = 'vnet-primary'
+param primaryVnetResourceGroupName = 'rg-network-primary'
+param primaryInfrastructureSubnetPrefix = '$SubnetPrefix'
+param primaryPrivateEndpointSubnetName = 'snet-endpoints'
+param primaryFileDnsZoneId = '$subscription/resourceGroups/rg-dns-primary/providers/Microsoft.Network/privateDnsZones/privatelink.file.core.windows.net'
+param secondaryNetworkMode = 'new'
+param registryMode = 'new'
+param alertEmailAddresses = ['alerts@replication.test']
+"@ | Set-Content -LiteralPath $hybridParametersFile -Encoding utf8
+    }
+    function Get-HybridRules([bool]$NameAvailable) {
+        @(
+            (New-Rule 'network vnet show --resource-group rg-network-primary*' @{
+                id = $vnetPrimary; location = 'westus2'; dhcpOptions = @{ dnsServers = @() }; virtualNetworkPeerings = @()
+                addressSpace = @{ addressPrefixes = @('10.1.0.0/16') }
+                subnets = @(@{ name = 'snet-jobs-in-use'; addressPrefix = '10.1.0.0/23' }, @{ name = 'snet-endpoints'; addressPrefix = '10.1.2.0/24'; delegations = @() })
+            }),
+            (New-Rule 'storage account check-name --name stnewsecondary*' @{ nameAvailable = $NameAvailable; message = 'The storage account named stnewsecondary is already taken.' }),
+            (New-Rule 'rest --method get --url *Microsoft.Storage/skus*' @{ value = @(@{ name = 'Standard_LRS'; kind = 'StorageV2'; locations = @('northcentralus'); restrictions = @() }) }),
+            (New-Rule 'network vnet list*' @(@{ name = 'vnet-primary'; addressSpace = @{ addressPrefixes = @('10.1.0.0/16') } })),
+            (New-Rule "network private-dns link vnet list --subscription 00000000-0000-0000-0000-000000000000 --resource-group rg-dns-primary --zone-name privatelink.file.core.windows.net *" @(@{ virtualNetwork = @{ id = $vnetPrimary } }))
+        )
+    }
+
+    Set-HybridParameters '10.1.4.0/23'
+    $fakeAzRules = $commonRules + (Get-HybridRules $true) + (Get-ExistingRules -PrimaryEndpoints @('pe-primary-file-a', 'pe-primary-file-b') -SecondaryEndpoints @())
+    $report = Invoke-Inventory $hybridParametersFile
+    Assert-True ((Get-Status $report 'secondary account stnewsecondary') -contains 'To be created') 'a new storage account was not reported as to be created'
+    Assert-True ((Get-Status $report 'Standard_LRS in northcentralus') -contains 'Ready') 'the new account SKU was not checked'
+    Assert-True ((Get-Status $report 'primary Container Apps subnet snet-replication-jobs (new)') -contains 'To be created') 'a free subnet prefix was not accepted'
+    Assert-True ((Get-Status $report 'primary endpoint subnet snet-endpoints') -contains 'To be created') 'the endpoint subnet for new endpoints was not checked'
+    Assert-True ((Get-Status $report 'primary file DNS zone for new endpoints') -contains 'Ready') 'a linked DNS zone for new endpoints was not accepted'
+    Assert-True ((Get-Status $report 'primary registry DNS zone for new endpoints') -contains 'Warning') 'a missing registry DNS zone was not flagged'
+    Assert-True ((Get-Status $report 'secondary VNet vnet-replication-sec (new)') -contains 'To be created') 'a new VNet was not reported as to be created'
+    Assert-True ((Get-Status $report 'Registry (new)') -contains 'To be created') 'a new registry was not reported as to be created'
+    Assert-True ((Get-Status $report 'primary job copy path*') -contains 'Ready') 'an existing source endpoint plus a created destination endpoint was not accepted'
+    Assert-True ((Get-Status $report 'secondary job copy path*') -contains 'Ready') 'endpoints created in a new VNet were not accepted'
+    Assert-True ((Get-Status $report '*job registry path') -notcontains 'Action required') 'endpoints created for a new registry were not accepted'
+    Assert-True ($report.Summary.PrerequisitesActionRequired -eq 0) "unexpected hybrid action items: $(@($report.Prerequisites | Where-Object Status -eq 'Action required' | ForEach-Object Item) -join '; ')"
+
+    Set-HybridParameters '10.1.2.0/25'
+    $fakeAzRules = $commonRules + (Get-HybridRules $false) + (Get-ExistingRules -PrimaryEndpoints @('pe-primary-file-a', 'pe-primary-file-b') -SecondaryEndpoints @())
+    $report = Invoke-Inventory $hybridParametersFile
+    Assert-True ((Get-Status $report 'primary Container Apps subnet snet-replication-jobs (new)') -contains 'Action required') 'an overlapping subnet prefix was accepted'
+    Assert-True ((Get-Status $report 'secondary account stnewsecondary') -contains 'Action required') 'an unavailable storage account name was accepted'
 } finally {
     Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

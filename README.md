@@ -74,9 +74,9 @@ See [docs/infrastructure-plan.md](docs/infrastructure-plan.md) for topology and 
 ## Deployment profiles
 
 - `infra/main.bicep` creates the complete demonstration topology, including storage, VNets, endpoints, DNS, and ACR.
-- `infra/existing.bicep` references existing storage accounts, file shares, networking, private endpoints, DNS, and a container registry. It creates replication identities and RBAC, Log Analytics workspaces, Container Apps environments and jobs, and Azure Monitor alerting resources.
+- `infra/existing.bicep` reuses existing storage accounts, file shares, networking, private endpoints, DNS, and a container registry, or creates any of those services that you [flag as new](#reuse-or-create-each-service). It always creates replication identities and RBAC, Log Analytics workspaces, Container Apps environments and jobs, and Azure Monitor alerting resources.
 
-The existing-resource profile is additive. It does not redeploy or change the supplied storage accounts, VNets, private endpoints, private DNS zones, or ACR.
+The existing-resource profile is additive. It doesn't redeploy or change the properties of the storage accounts, VNets, private endpoints, private DNS zones, or ACR that it reuses. It adds to them only what you request: a job subnet in `newSubnet` mode, private endpoint connections for the endpoints it creates, and DNS records in the zones you name.
 
 ## Prerequisites
 
@@ -109,7 +109,7 @@ pwsh ./scripts/inventory.ps1 -ParametersFile ./infra/existing.bicepparam -Output
 
 The report contains two tables:
 
-- **Prerequisites** lists placeholder parameters, resource provider registration, and Container Apps availability in both regions. For the greenfield profile, it also checks storage SKU availability. For the existing-resource profile, it checks the storage accounts and shares, the VNets and delegated subnets, the registry and digest-pinned image, the [server-side copy network layout](#network-requirements-for-server-side-copy), the private DNS records for the file endpoints, and registry reachability. Each item is `Ready`, `Action required`, `Warning`, or `Not verified`.
+- **Prerequisites** lists placeholder parameters, resource provider registration, and Container Apps availability in both regions. For the greenfield profile, it also checks storage SKU availability. For the existing-resource profile, it checks the storage accounts and shares, the VNets and delegated subnets, the registry and digest-pinned image, the [server-side copy network layout](#network-requirements-for-server-side-copy), the private DNS records for the file endpoints, and registry reachability. Services set to `new` are reported as `To be created`, after the inventory checks their inputs: SKU availability, name availability, a free and non-overlapping subnet prefix, and the endpoint subnet and DNS zones for endpoints created in existing VNets. Each item is `Ready`, `To be created`, `Action required`, `Warning`, or `Not verified`.
 - **Template resources** lists every resource from `az deployment sub what-if` as `To be provisioned`, `Exists, will be redeployed`, or `Exists, not managed by this template`. The inventory requests resource IDs only, so it reports whether each resource exists but doesn't compare properties. To review property-level differences, run `az deployment sub what-if` with the same parameter file.
 
 Resource lookups need Reader access. What-if needs deployment permissions; use `-SkipWhatIf` to omit it. Resolve every `Action required` item before deploying.
@@ -145,9 +145,29 @@ The **Replication network readiness** table shows, for each VNet:
 - whether the linked `privatelink.file` zone resolves each account to its endpoint; and
 - the registries with endpoints.
 
-Choose two VNets in different regions. Each one needs a job subnet, file endpoints that resolve for both storage accounts, and a registry endpoint. Record your choices in `infra/existing.bicepparam`, then validate them with the [inventory check](#inventory-check).
+Choose two VNets in different regions. Each one needs a job subnet, file endpoints that resolve for both storage accounts, and a registry endpoint. Anything missing can be created by the deployment instead; see [Reuse or create each service](#reuse-or-create-each-service).
 
 The audit lists resources across the subscription, so endpoints, peerings, and DNS zones in resource groups you didn't name still count toward the audited resources. It doesn't see other subscriptions, such as private DNS zones in a central connectivity subscription. For VNets that use custom DNS servers, it reports name resolution as not verified. Reader access is enough; the audit ignores resources you can't read.
+
+### Generate the parameter file
+
+Give the audit the two replication regions, and it writes an existing-resource parameter file from what it found:
+
+```powershell
+pwsh ./scripts/audit-existing-resources.ps1 -ResourceGroupName rg-storage, rg-network, rg-dns `
+	-PrimaryLocation eastus2 -SecondaryLocation westus2 `
+	-ParametersOutputPath ./infra/existing.bicepparam `
+	-ReplicationResourceGroupName rg-files-replication -AlertEmailAddress ops@example.com `
+	-New registry
+```
+
+For each service, the audit chooses as follows:
+
+- **Reuse:** it sets `existing` and fills in the names when exactly one resource in the role's region qualifies. For a VNet, it prefers the one that already has endpoints for the chosen services.
+- **Create:** it sets `new` when nothing in the audited resource groups qualifies, or when you list the service in `-New`. Valid `-New` values are `primaryStorage`, `secondaryStorage`, `primaryNetwork`, `secondaryNetwork`, and `registry`.
+- **Ask:** it writes a value in angle brackets, with the candidates, when several resources qualify equally. The inventory reports these values as `Action required` until you replace them.
+
+For each reused VNet, the audit also lists in `primaryEndpointsToCreate` or `secondaryEndpointsToCreate` the reused services that have no endpoint there. When the deployment will create endpoints in the VNet, the audit fills in its endpoint subnet and the IDs of the private DNS zones linked to it. New VNets get address ranges that don't overlap any VNet in the subscription. The audit comments each choice in the file, checks that the file compiles, and refuses to overwrite an existing file without `-Force`. Keep the generated file out of source control: `infra/existing.bicepparam` and `infra/*.local.bicepparam` are git-ignored.
 
 ## RBAC requirements
 
@@ -162,7 +182,7 @@ The templates create two user-assigned managed identities, one for each regional
 
 Both identities need access to both file accounts because either region can become the replication source. Do not replace the Azure Files data role with a management-plane role such as Contributor; management-plane access does not authorize file data operations. Storage keys and SAS tokens are not used.
 
-The identity running the deployment must be able to create the subscription- and resource-group-scoped resources, attach the managed identities to the jobs, and create the role assignments above. The straightforward assignment is **Owner** at the subscription. A more separated configuration is **Contributor** plus **Role Based Access Control Administrator** at the subscription, or equivalent custom roles containing the required resource writes, `Microsoft.ManagedIdentity/userAssignedIdentities/assign/action`, and `Microsoft.Authorization/roleAssignments/write`. For the existing-resource profile, those permissions must include the workload resource group, both existing storage accounts, and the existing ACR; all referenced resources must be in the deployment subscription.
+The identity running the deployment must be able to create the subscription- and resource-group-scoped resources, attach the managed identities to the jobs, and create the role assignments above. The straightforward assignment is **Owner** at the subscription. A more separated configuration is **Contributor** plus **Role Based Access Control Administrator** at the subscription, or equivalent custom roles containing the required resource writes, `Microsoft.ManagedIdentity/userAssignedIdentities/assign/action`, and `Microsoft.Authorization/roleAssignments/write`. For the existing-resource profile, those permissions must include the workload resource group and each storage account and registry that it reuses. All reused resources must be in the deployment subscription; only the private DNS zones named by zone ID can be in another subscription. Creating services needs the [additional rights](#reuse-or-create-each-service) listed with the modes.
 
 When `scripts/deploy.ps1` builds the image instead of receiving `-ContainerImage`, the caller also needs permission to queue an ACR Task build and read the resulting manifest. For a non-ABAC registry, grant **AcrPush** on the registry in addition to the required management-plane access. Supplying a prebuilt digest-pinned image avoids this build-time permission.
 
@@ -176,7 +196,7 @@ See [docs/infrastructure-plan.md](docs/infrastructure-plan.md#rbac-and-service-p
 
 ## Existing-resource deployment from Azure Cloud Shell
 
-Use this profile when the storage accounts, file shares, VNets, private endpoints, private DNS zones, and container registry already exist. Workloads that use the shares, such as Kubernetes clusters or VMs, are not changed; the replication jobs run in their own Container Apps environments.
+Use this profile when some or all of the storage accounts, file shares, VNets, private endpoints, private DNS zones, and container registry already exist. Services that don't exist, or that you prefer to replace, can be [created by the same deployment](#reuse-or-create-each-service). Workloads that use the shares, such as Kubernetes clusters or VMs, are not changed; the replication jobs run in their own Container Apps environments.
 
 ### Network requirements for server-side copy
 
@@ -191,11 +211,38 @@ Reaching the other region only through a hub VNet or Virtual WAN hub satisfies n
 
 A VNet can link only one private DNS zone with a given name. If workload VNets share a central `privatelink.file.core.windows.net` zone, don't add a second private endpoint for an existing storage account to that zone: its record can redirect other workloads to the wrong endpoint. Use dedicated replication VNets with their own zone links, or use the direct-peering layout.
 
+### Reuse or create each service
+
+Each service has a mode parameter. `existing` is the default, so parameter files written before the modes existed keep working. A new service needs no names; the deployment creates it in `resourceGroupName`. To choose a name instead, set the name parameter.
+
+| Service | Mode parameters | `existing` | `new` |
+| --- | --- | --- | --- |
+| Storage | `primaryStorageMode`, `secondaryStorageMode` | Reuses the account and SMB share that you name. | Creates a private storage account and SMB share. Set the SKU with `primaryStorageSkuName` or `secondaryStorageSkuName` (default `Standard_LRS`; Premium SKUs create a FileStorage account) and the quota with `newFileShareQuotaGiB`. |
+| Network | `primaryNetworkMode`, `secondaryNetworkMode` | Reuses the VNet and its empty delegated subnet. `newSubnet` adds a delegated job subnet to that VNet at `primaryInfrastructureSubnetPrefix` or `secondaryInfrastructureSubnetPrefix`. | Creates a dedicated VNet at `primaryVnetAddressPrefix` or `secondaryVnetAddressPrefix`, `/22` or larger. It gets a `/23` job subnet, an endpoint subnet, and its own split-horizon private DNS zones in `primaryDnsResourceGroupName` or `secondaryDnsResourceGroupName`. |
+| Registry | `registryMode` | Reuses the registry that you name. For a Basic or Standard registry that the jobs reach publicly, set `registryPrivateEndpointsEnabled = false`. | Creates a Premium registry with a replica in the secondary region. `scripts/deploy.ps1` builds the AzCopy image into it, opening public access only during the build. |
+
+The deployment creates a private endpoint in each job VNet for:
+
+- every service it creates;
+- every service, when it creates the VNet; and
+- each existing service listed in `primaryEndpointsToCreate` or `secondaryEndpointsToCreate`, for a VNet you reuse. Valid values are `primaryStorage`, `secondaryStorage`, and `registry`.
+
+Endpoints between existing resources that aren't listed must already exist. Endpoints created in an existing VNet go in `primaryPrivateEndpointSubnetName` or `secondaryPrivateEndpointSubnetName`, and they register in the zones given by the `*FileDnsZoneId` and `*RegistryDnsZoneId` parameters. Leave a zone ID empty when Azure Policy or another process creates the records.
+
+A deployment that is missing a required input fails validation with a message that names the parameters, before any resource changes. Resources that the deployment creates are removed with `resourceGroupName` and the new DNS resource groups. A subnet added in `newSubnet` mode stays in its VNet: delete it after the environment, and add it to any other IaC that manages the VNet so that a later deployment doesn't remove it.
+
+Creating services needs rights beyond the [RBAC requirements](#rbac-requirements):
+
+- `Microsoft.Network/virtualNetworks/subnets/join/action` on subnets used for endpoints.
+- `Microsoft.Network/virtualNetworks/subnets/write` on a VNet that gets a subnet.
+- Private DNS Zone Contributor on the zones that receive records.
+- Approval rights on existing storage accounts and registries that get new endpoints. Without approval rights, a new endpoint connection stays pending until the resource owner approves it.
+
 ### Before you deploy
 
-If you haven't chosen the storage accounts, VNets, and registry yet, run the [reuse audit](#reuse-audit) against the candidate resource groups first.
+If you haven't chosen the storage accounts, VNets, and registry yet, run the [reuse audit](#reuse-audit) against the candidate resource groups first. It can [generate the parameter file](#generate-the-parameter-file).
 
-Run the [inventory check](#inventory-check) with your parameter file after you create it in [Deploy in stages](#deploy-in-stages); it automates most of these checks:
+Run the [inventory check](#inventory-check) with your parameter file after you create it in [Deploy in stages](#deploy-in-stages); it automates most of these checks. Checks for a service set to `new` are replaced by checks of its inputs:
 
 ```powershell
 pwsh ./scripts/inventory.ps1 -ParametersFile ./infra/existing.bicepparam
@@ -208,7 +255,7 @@ pwsh ./scripts/inventory.ps1 -ParametersFile ./infra/existing.bicepparam
 | File shares | SMB shares in classic `Microsoft.Storage` storage accounts. NFS shares and `Microsoft.FileShares` resources aren't supported. The destination share is empty or disposable and has quota for the source data plus growth, because deletions aren't replicated. |
 | Registry | Reachable from both job subnets. If the registry uses ABAC repository permissions, `AcrPull` isn't honored; assign **Container Registry Repository Reader** to both job identities instead. |
 | Subscription and rights | All referenced resources are in the deployment subscription. The deploying identity can create resources and role assignments in the replication resource group, and can assign roles on both storage accounts and the registry. |
-| Parameter file | Keep the default `tags`, or include `Workload: 'azure-files-dr-replication'`, because `scripts/switch-direction.ps1` finds the jobs by that tag. `existingPrivateEndpointIds` is recorded for reference only; the template doesn't validate endpoint approval or DNS. |
+| Parameter file | Keep the default `tags`, or include `Workload: 'azure-files-dr-replication'`, because `scripts/switch-direction.ps1` finds the jobs by that tag. `existingPrivateEndpointIds` is recorded for reference only; the template doesn't validate endpoint approval or DNS. Each service's mode matches your intent: `existing` services must already meet the checks above, and `new` services are created. |
 
 ### Put the AzCopy image in the registry
 
@@ -243,15 +290,17 @@ az acr delete --name <build-registry> --yes
 
 Set `containerImage` in the parameter file to `<registry-name>.azurecr.io/azure-files-dr-azcopy@<digest>`.
 
+If `registryMode` is `new`, the registry doesn't exist until the first deployment. Either let `scripts/deploy.ps1` build the image, or create the registry with public access for the build: add `--parameters acrPublicNetworkAccess=Enabled` to the stage 1 deployment below, build and read the digest as above, and keep `acrPublicNetworkAccess=Disabled`, the default, for every later deployment.
+
 ### Deploy in stages
 
-Create a local parameter file that Git ignores:
+Create a local parameter file that Git ignores, either from the example or with the [reuse audit](#generate-the-parameter-file):
 
 ```bash
 cp infra/existing.example.bicepparam infra/existing.bicepparam
 ```
 
-Edit every placeholder in `infra/existing.bicepparam`, and keep `activeRegion = 'none'` for the first deployment so both jobs are created without a schedule. Set `alertEmailAddresses` to one or more monitored operations addresses. The deployment creates an Azure Monitor Action Group and enables Common Alert Schema for every receiver. Supported `replicationLagThresholdMinutes` values are `20`, `30`, and `60`; the default is `30`.
+Edit every placeholder in `infra/existing.bicepparam`, set a [mode](#reuse-or-create-each-service) for each service, and keep `activeRegion = 'none'` for the first deployment so both jobs are created without a schedule. Set `alertEmailAddresses` to one or more monitored operations addresses. The deployment creates an Azure Monitor Action Group and enables Common Alert Schema for every receiver. Supported `replicationLagThresholdMinutes` values are `20`, `30`, and `60`; the default is `30`.
 
 Validate, preview, and deploy:
 
@@ -277,7 +326,7 @@ az deployment sub create --name azure-files-dr-activate \
 
 Then set `activeRegion = 'primary'` in `infra/existing.bicepparam`. A later deployment that still uses `none` removes the schedule and disables the freshness alerts.
 
-`scripts/deploy.ps1` runs both stages in one command, but it activates the primary schedule without pausing for validation, and every run redeploys `activeRegion=none` before activating the primary region again. Use it only for an initial deployment:
+`scripts/deploy.ps1` runs both stages in one command, but it activates the primary schedule without pausing for validation, and every run redeploys `activeRegion=none` before activating the primary region again. Use it only for an initial deployment. Omit `-ContainerImage` to build the image into the registry, which works for a new registry and for an existing registry this host can reach:
 
 ```powershell
 pwsh ./scripts/deploy.ps1 `
@@ -352,6 +401,7 @@ az deployment sub what-if --location southcentralus --parameters infra/main.bice
 pwsh ./scripts/inventory.ps1
 pwsh ./tests/test-monitoring-template.ps1
 pwsh ./tests/test-foundation-templates.ps1
+pwsh ./tests/test-existing-profile.ps1
 pwsh ./tests/test-inventory.ps1
 pwsh ./tests/test-audit.ps1
 pwsh ./tests/test-deployment-scripts.ps1

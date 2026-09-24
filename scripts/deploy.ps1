@@ -53,7 +53,6 @@ if ([string]::IsNullOrWhiteSpace($TemplateFile)) {
 if (-not (Test-Path $TemplateFile -PathType Leaf)) {
     throw "Template file '$TemplateFile' was not found."
 }
-$isBrownfield = [IO.Path]::GetFileName($TemplateFile) -eq 'existing.bicep'
 $null = Invoke-AzCli -Arguments @('bicep', 'build', '--file', $templateFile, '--stdout')
 $null = Invoke-AzCli -Arguments @(
     'deployment', 'sub', 'validate',
@@ -78,10 +77,8 @@ if (-not $PSCmdlet.ShouldProcess('current subscription', 'Deploy the replication
     return
 }
 
-$bootstrapOverrides = @('activeRegion=none')
-if (-not $isBrownfield) {
-    $bootstrapOverrides += 'acrPublicNetworkAccess=Enabled'
-}
+# acrPublicNetworkAccess applies only to a registry the templates create; it's public only while the image is built.
+$bootstrapOverrides = @('activeRegion=none', 'acrPublicNetworkAccess=Enabled')
 $bootstrapArguments = @(
     'deployment', 'sub', 'create',
     '--name', "azure-files-dr-bootstrap-$(Get-Date -Format 'yyyyMMddHHmmss')",
@@ -115,10 +112,7 @@ if ($ContainerImage) {
     $image = "${registryName}.azurecr.io/${ImageRepository}@$($digest.Trim())"
 }
 
-$finalOverrides = @("containerImage=$image", 'activeRegion=primary')
-if (-not $isBrownfield) {
-    $finalOverrides += 'acrPublicNetworkAccess=Disabled'
-}
+$finalOverrides = @("containerImage=$image", 'activeRegion=primary', 'acrPublicNetworkAccess=Disabled')
 $finalArguments = @(
     'deployment', 'sub', 'create',
     '--name', "azure-files-dr-final-$(Get-Date -Format 'yyyyMMddHHmmss')",

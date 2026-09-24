@@ -4,12 +4,17 @@ $ErrorActionPreference = 'Stop'
 
 $repositoryRoot = Split-Path $PSScriptRoot -Parent
 $auditScript = Join-Path $repositoryRoot 'scripts/audit-existing-resources.ps1'
+$realAz = (Get-Command az -CommandType Application | Select-Object -First 1).Source
 $subscription = '/subscriptions/00000000-0000-0000-0000-000000000000'
 $azCalls = [System.Collections.Generic.List[string]]::new()
 
 function az {
     $joined = $args -join ' '
     $azCalls.Add($joined)
+    if ($args[0] -eq 'bicep') {
+        & $realAz @args
+        return
+    }
     foreach ($rule in $fakeAzRules) {
         if ($joined -like $rule.Pattern) {
             $global:LASTEXITCODE = 0
@@ -135,9 +140,9 @@ $fakeAzRules = @(
     )),
     (New-NicRule 'pe-secondary-file' @(@{ privateIPAddress = '10.2.3.4'; privateLinkConnectionProperties = @{ requiredMemberName = 'file' } })),
     (New-Rule 'network private-dns zone list*' @(
-        @{ name = 'privatelink.file.core.windows.net'; resourceGroup = 'rg-dns'; numberOfRecordSets = 3 },
-        @{ name = 'privatelink.azurecr.io'; resourceGroup = 'rg-dns'; numberOfRecordSets = 1 },
-        @{ name = 'privatelink.blob.core.windows.net'; resourceGroup = 'rg-dns'; numberOfRecordSets = 2 }
+        @{ id = (Get-Id 'rg-dns' 'Microsoft.Network/privateDnsZones' 'privatelink.file.core.windows.net'); name = 'privatelink.file.core.windows.net'; resourceGroup = 'rg-dns'; numberOfRecordSets = 3 },
+        @{ id = (Get-Id 'rg-dns' 'Microsoft.Network/privateDnsZones' 'privatelink.azurecr.io'); name = 'privatelink.azurecr.io'; resourceGroup = 'rg-dns'; numberOfRecordSets = 1 },
+        @{ id = (Get-Id 'rg-dns' 'Microsoft.Network/privateDnsZones' 'privatelink.blob.core.windows.net'); name = 'privatelink.blob.core.windows.net'; resourceGroup = 'rg-dns'; numberOfRecordSets = 2 }
     )),
     (New-Rule 'network private-dns link vnet list --resource-group rg-dns --zone-name privatelink.file.core.windows.net *' @(@{ virtualNetwork = @{ id = $vnetPrimaryId } })),
     (New-Rule 'network private-dns link vnet list --resource-group rg-dns --zone-name privatelink.azurecr.io *' @()),
@@ -213,5 +218,77 @@ Assert-True ($unexpected.Count -eq 0) "non-read-only Azure CLI calls: $($unexpec
 $report = Invoke-Audit
 Assert-True (@($report.ResourceGroups).Count -eq 5) 'the whole subscription was not audited by default'
 $null = Assert-Status $report 'Storage account' 'stother' 'Reusable'
+
+# Parameter file generation: reuse what fits, create what's missing or requested, and ask when the choice is ambiguous.
+$generatedRoot = Join-Path ([IO.Path]::GetTempPath()) "audit-generated-$([guid]::NewGuid().ToString('N'))"
+New-Item -ItemType Directory -Path $generatedRoot | Out-Null
+$scopedGroups = @('rg-storage', 'rg-network', 'rg-dns', 'rg-registry')
+
+function Invoke-Generation([string]$Name, [hashtable]$Arguments) {
+    $path = Join-Path $generatedRoot $Name
+    & $auditScript -ResourceGroupName $scopedGroups -PrimaryLocation westus2 -SecondaryLocation northcentralus -ParametersOutputPath $path @Arguments 6> $null 3> $null
+    Assert-True (Test-Path -LiteralPath $path) "$Name was not written"
+    & $realAz bicep build-params --file $path --stdout *> $null
+    Assert-True ($LASTEXITCODE -eq 0) "$Name does not compile against infra/existing.bicep"
+    return Get-Content -LiteralPath $path -Raw
+}
+
+function Assert-Contains([string]$Text, [string[]]$Expected, [string]$Context) {
+    foreach ($line in $Expected) {
+        Assert-True ($Text.Contains($line)) "$Context is missing: $line"
+    }
+}
+
+try {
+    $generated = Invoke-Generation 'reuse.bicepparam' @{ New = @('registry'); AlertEmailAddress = @('ops@replication.test') }
+    Assert-Contains $generated @(
+        "param primaryStorageMode = 'existing'", "param primaryStorageAccountName = 'stprimary'", "param primaryStorageResourceGroupName = 'rg-storage'", "param primaryFileShareName = 'share'",
+        "param secondaryStorageMode = 'existing'", "param secondaryStorageAccountName = 'stsecondary'",
+        "param primaryNetworkMode = 'existing'", "param primaryVnetName = 'vnet-primary'", "param primaryInfrastructureSubnetName = 'snet-jobs'",
+        "param primaryPrivateEndpointSubnetName = 'snet-endpoints'", "param primaryRegistryDnsZoneId = ''",
+        "param secondaryNetworkMode = 'new'", "param secondaryVnetAddressPrefix = '10.20.0.0/16'",
+        "param registryMode = 'new'", "/privateEndpoints/pe-primary-file'", "/privateEndpoints/pe-secondary-file-in-primary'", "'ops@replication.test'"
+    ) 'the reuse parameter file'
+    Assert-True (-not $generated.Contains('primaryEndpointsToCreate')) 'endpoints that already exist were requested again'
+    Assert-True (-not ($generated -match '<[^>]+>')) 'the reuse parameter file has unexpected placeholders'
+
+    $generated = Invoke-Generation 'create.bicepparam' @{ New = @('primaryNetwork,secondaryStorage') }
+    Assert-Contains $generated @(
+        "param primaryNetworkMode = 'new'", "param primaryVnetAddressPrefix = '10.10.0.0/16'",
+        "param secondaryStorageMode = 'new'", "param secondaryFileShareName = 'share'", "param secondaryStorageSkuName = 'Standard_LRS'",
+        "param registryMode = 'existing'", "param registryName = 'acrshared'", "'<operations-email-address>'"
+    ) 'the create parameter file'
+
+    # A second SMB account in the primary region makes the source ambiguous.
+    $fakeAzRules = @(
+        (New-Rule 'storage account list*' @(
+            @{ id = $storagePrimaryId; name = 'stprimary'; resourceGroup = 'rg-storage'; location = 'westus2'; kind = 'StorageV2'; sku = @{ name = 'Standard_ZRS' }; publicNetworkAccess = 'Disabled' },
+            @{ id = (Get-Id 'rg-storage' 'Microsoft.Storage/storageAccounts' 'stprimary2'); name = 'stprimary2'; resourceGroup = 'rg-storage'; location = 'westus2'; kind = 'StorageV2'; sku = @{ name = 'Standard_LRS' }; publicNetworkAccess = 'Enabled' }
+        )),
+        (New-Rule 'storage share-rm list *--storage-account stprimary2 *' @(@{ name = 'archive'; enabledProtocols = 'SMB'; shareQuota = 100; accessTier = 'Hot' }))
+    ) + $fakeAzRules
+    $generated = Invoke-Generation 'ambiguous.bicepparam' @{ AlertEmailAddress = @('ops@replication.test') }
+    Assert-True ($generated -match "param primaryStorageAccountName = '<choose an account: stprimary \| stprimary2>'") 'an ambiguous source account was not left for the user to choose'
+    Assert-True ($generated.Contains("param secondaryStorageMode = 'new'")) 'with no secondary candidate left, the destination account was not created'
+    Assert-True ($generated.Contains("param primaryFileDnsZoneId = '$subscription/resourceGroups/rg-dns/providers/Microsoft.Network/privateDnsZones/privatelink.file.core.windows.net'")) 'the linked file zone was not used for the new account endpoint'
+
+    $failure = $null
+    try {
+        & $auditScript -New 'firewall' -PrimaryLocation westus2 -SecondaryLocation northcentralus -ParametersOutputPath (Join-Path $generatedRoot 'bad.bicepparam') 6> $null
+    } catch {
+        $failure = $_.Exception.Message
+    }
+    Assert-True ($failure -like "*Unknown -New service 'firewall'*") "an unknown -New service was accepted: $failure"
+
+    $failure = $null
+    try {
+        & $auditScript -ResourceGroupName $scopedGroups -PrimaryLocation westus2 -SecondaryLocation northcentralus -ParametersOutputPath (Join-Path $generatedRoot 'reuse.bicepparam') 6> $null
+    } catch {
+        $failure = $_.Exception.Message
+    }
+    Assert-True ($failure -like '*already exists*-Force*') "an existing parameter file was overwritten without -Force: $failure"
+} finally {
+    Remove-Item -LiteralPath $generatedRoot -Recurse -Force -ErrorAction SilentlyContinue
+}
 
 Write-Host 'Audit script checks passed.'

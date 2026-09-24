@@ -58,7 +58,6 @@ if ([string]::IsNullOrWhiteSpace($TemplateFile)) {
 if (-not (Test-Path $TemplateFile -PathType Leaf)) {
     throw "Template file '$TemplateFile' was not found."
 }
-$isBrownfield = [IO.Path]::GetFileName($TemplateFile) -eq 'existing.bicep'
 
 $jobs = Invoke-AzCli -Arguments @(
     'containerapp', 'job', 'list',
@@ -93,10 +92,8 @@ if (-not $PSCmdlet.ShouldProcess($ResourceGroupName, "Set '$ActiveRegion' as the
     return
 }
 
-$deploymentOverrides = @("containerImage=$($images[0])", "activeRegion=$ActiveRegion")
-if (-not $isBrownfield) {
-    $deploymentOverrides += 'acrPublicNetworkAccess=Disabled'
-}
+# acrPublicNetworkAccess applies only to a registry the templates create.
+$deploymentOverrides = @("containerImage=$($images[0])", "activeRegion=$ActiveRegion", 'acrPublicNetworkAccess=Disabled')
 $deploymentArguments = @(
     'deployment', 'sub', 'create',
     '--name', "azure-files-dr-switch-$(Get-Date -Format 'yyyyMMddHHmmss')",

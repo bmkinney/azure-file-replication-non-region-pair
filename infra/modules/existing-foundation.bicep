@@ -11,12 +11,10 @@ param primaryFileShareName string
 param secondaryStorageAccountName string
 param secondaryStorageResourceGroupName string
 param secondaryFileShareName string
-param primaryVnetName string
-param primaryVnetResourceGroupName string
-param primaryInfrastructureSubnetName string
-param secondaryVnetName string
-param secondaryVnetResourceGroupName string
-param secondaryInfrastructureSubnetName string
+@description('Container Apps infrastructure subnet in the primary region: existing, added to an existing VNet, or in a new VNet.')
+param primaryInfrastructureSubnetId string
+@description('Container Apps infrastructure subnet in the secondary region: existing, added to an existing VNet, or in a new VNet.')
+param secondaryInfrastructureSubnetId string
 param registryName string
 param registryResourceGroupName string
 param existingPrivateEndpointIds array
@@ -42,26 +40,6 @@ resource primaryStorage 'Microsoft.Storage/storageAccounts@2025-01-01' existing 
 resource secondaryStorage 'Microsoft.Storage/storageAccounts@2025-01-01' existing = {
   name: secondaryStorageAccountName
   scope: resourceGroup(secondaryStorageResourceGroupName)
-}
-
-resource primaryVnet 'Microsoft.Network/virtualNetworks@2024-10-01' existing = {
-  name: primaryVnetName
-  scope: resourceGroup(primaryVnetResourceGroupName)
-}
-
-resource primaryInfrastructureSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-10-01' existing = {
-  parent: primaryVnet
-  name: primaryInfrastructureSubnetName
-}
-
-resource secondaryVnet 'Microsoft.Network/virtualNetworks@2024-10-01' existing = {
-  name: secondaryVnetName
-  scope: resourceGroup(secondaryVnetResourceGroupName)
-}
-
-resource secondaryInfrastructureSubnet 'Microsoft.Network/virtualNetworks/subnets@2024-10-01' existing = {
-  parent: secondaryVnet
-  name: secondaryInfrastructureSubnetName
 }
 
 resource registry 'Microsoft.ContainerRegistry/registries@2025-04-01' existing = {
@@ -143,7 +121,7 @@ resource primaryEnvironment 'Microsoft.App/managedEnvironments@2025-01-01' = {
       }
     }
     vnetConfiguration: {
-      infrastructureSubnetId: primaryInfrastructureSubnet.id
+      infrastructureSubnetId: primaryInfrastructureSubnetId
       internal: true
     }
     workloadProfiles: [
@@ -169,7 +147,7 @@ resource secondaryEnvironment 'Microsoft.App/managedEnvironments@2025-01-01' = {
       }
     }
     vnetConfiguration: {
-      infrastructureSubnetId: secondaryInfrastructureSubnet.id
+      infrastructureSubnetId: secondaryInfrastructureSubnetId
       internal: true
     }
     workloadProfiles: [

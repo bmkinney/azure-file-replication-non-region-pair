@@ -115,6 +115,34 @@ try {
     Assert-True (@($azCalls | Where-Object { $_ -like 'containerapp job execution list*' }).Count -eq 2) 'switch-direction.ps1 did not check both jobs for running executions'
     Assert-True (@($azCalls | Where-Object { $_ -like 'deployment sub create*' }).Count -eq 0) 'switch-direction.ps1 -WhatIf changed Azure resources'
     Assert-True ((Get-LeakedTempFiles).Count -eq 0) "switch-direction.ps1 -WhatIf left temporary files: $((Get-LeakedTempFiles).Name -join ', ')"
+
+    # A registry the templates create is public only while deploy.ps1 builds the image, for either profile.
+    $outputs = @{ properties = @{ outputs = @{
+        registryName            = @{ value = 'acrtest' }
+        primaryJobName          = @{ value = 'job-sync-primary' }
+        secondaryJobName        = @{ value = 'job-sync-secondary' }
+        monitoringActionGroupId = @{ value = 'action-group' }
+    } } }
+    $fakeAzRules = $commonRules + @(
+        (New-Rule 'deployment sub validate*' '{}')
+        (New-Rule 'deployment sub create*' (ConvertTo-Json -InputObject $outputs -Depth 5 -Compress))
+        (New-Rule 'acr build*' '')
+        (New-Rule 'acr manifest show-metadata*' "sha256:$digest")
+    )
+    Invoke-WithIsolatedTemp { & $deployScript -ParametersFile $parametersFile -SkipWhatIf -Confirm:$false 6> $null }
+    $creates = @($azCalls | Where-Object { $_ -like 'deployment sub create*' })
+    Assert-True ($creates.Count -eq 2) "deploy.ps1 ran $($creates.Count) deployments instead of bootstrap and final"
+    Assert-True ($creates[0] -like '*activeRegion=none acrPublicNetworkAccess=Enabled*') "the bootstrap deployment doesn't open the registry for the build: $($creates[0])"
+    Assert-True ($creates[1] -like "*containerImage=acrtest.azurecr.io/azure-files-dr-azcopy@sha256:$digest activeRegion=primary acrPublicNetworkAccess=Disabled*") "the final deployment doesn't pin the image and close the registry: $($creates[1])"
+
+    $fakeAzRules = @(
+        (New-Rule 'containerapp job list*' (ConvertTo-Json -InputObject $jobs -Depth 5 -Compress))
+        (New-Rule 'containerapp job execution list*' '0')
+        (New-Rule 'deployment sub create*' (ConvertTo-Json -InputObject $outputs -Depth 5 -Compress))
+    )
+    Invoke-WithIsolatedTemp { & $switchScript -ActiveRegion secondary -WritesFenced -ParametersFile $parametersFile -Confirm:$false 6> $null }
+    $creates = @($azCalls | Where-Object { $_ -like 'deployment sub create*' })
+    Assert-True ($creates.Count -eq 1 -and $creates[0] -like '*activeRegion=secondary acrPublicNetworkAccess=Disabled*') "switch-direction.ps1 doesn't keep the registry closed: $($creates -join '; ')"
 } finally {
     Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

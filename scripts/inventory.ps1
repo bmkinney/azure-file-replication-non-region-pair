@@ -64,7 +64,7 @@ function Add-Prerequisite {
     param(
         [Parameter(Mandatory)][string]$Area,
         [Parameter(Mandatory)][string]$Item,
-        [Parameter(Mandatory)][ValidateSet('Ready', 'Action required', 'Warning', 'Not verified')][string]$Status,
+        [Parameter(Mandatory)][ValidateSet('Ready', 'To be created', 'Action required', 'Warning', 'Not verified')][string]$Status,
         [string]$Detail = ''
     )
     $prerequisites.Add([pscustomobject]@{ Area = $Area; Item = $Item; Status = $Status; Detail = $Detail })
@@ -81,6 +81,15 @@ function Add-LookupFailure {
 }
 
 function Get-ResourceDescriptor([string]$ResourceId) {
+    # What-if returns an unevaluated expression when a name depends on a value created during the deployment.
+    if ($ResourceId -match "^\[extensionResourceId\('([^']+)',\s*'([^']+)'") {
+        $type = $Matches[2]
+        $scope = Get-ResourceDescriptor $Matches[1]
+        return [pscustomobject]@{ Type = $type; Name = "(named during deployment) on $(($scope.Name -split ' on ')[0] -split '/' | Select-Object -Last 1)"; ResourceGroup = $scope.ResourceGroup }
+    }
+    if ($ResourceId.StartsWith('[')) {
+        return [pscustomobject]@{ Type = '(named during deployment)'; Name = ''; ResourceGroup = '' }
+    }
     $relative = $ResourceId -replace '^/subscriptions/[^/]+', ''
     $resourceGroup = if ($relative -match '^/resourceGroups/([^/]+)') { $Matches[1] } else { '' }
     $providerIndex = $relative.LastIndexOf('/providers/', [StringComparison]::OrdinalIgnoreCase)
@@ -173,28 +182,35 @@ foreach ($namespace in 'Microsoft.App', 'Microsoft.ContainerRegistry', 'Microsof
     }
 }
 
-if (-not $isExistingProfile -and $primaryLocation -and $secondaryLocation) {
-    $skus = Invoke-Az -Arguments @('rest', '--method', 'get', '--url', "https://management.azure.com/subscriptions/$subscriptionId/providers/Microsoft.Storage/skus?api-version=2023-05-01")
-    foreach ($requirement in @(@{ Sku = 'Standard_ZRS'; Region = $primaryLocation; Purpose = 'primary storage accounts and zone-redundant ACR' }, @{ Sku = 'Standard_LRS'; Region = $secondaryLocation; Purpose = 'secondary storage accounts' })) {
-        $item = "$($requirement.Sku) in $($requirement.Region)"
-        if (-not $skus.Succeeded) {
-            Add-Prerequisite -Area 'Region' -Item $item -Status 'Not verified' -Detail $skus.Error
-            continue
-        }
-        $regionKey = ConvertTo-Key $requirement.Region
-        $offer = @(Get-Property $skus.Value 'value') | Where-Object {
-            (Get-Property $_ 'name') -eq $requirement.Sku -and (Get-Property $_ 'kind') -eq 'StorageV2' -and
-            (@(Get-Property $_ 'locations' | ForEach-Object { ConvertTo-Key $_ }) -contains $regionKey)
-        } | Select-Object -First 1
-        $restricted = $offer -and @(Get-Property $offer 'restrictions' | Where-Object {
-            @(Get-Property $_ 'values' | ForEach-Object { ConvertTo-Key $_ }) -contains $regionKey
-        }).Count -gt 0
-        if ($offer -and -not $restricted) {
-            Add-Prerequisite -Area 'Region' -Item $item -Status 'Ready' -Detail "Available for $($requirement.Purpose)."
-        } else {
-            Add-Prerequisite -Area 'Region' -Item $item -Status 'Action required' -Detail "Not available for $($requirement.Purpose); choose another region."
-        }
+$skuCatalog = $null
+
+function Test-StorageSku([string]$SkuName, [string]$Kind, [string]$Region, [string]$Purpose) {
+    $item = "$SkuName in $Region"
+    if ($null -eq $script:skuCatalog) {
+        $script:skuCatalog = Invoke-Az -Arguments @('rest', '--method', 'get', '--url', "https://management.azure.com/subscriptions/$subscriptionId/providers/Microsoft.Storage/skus?api-version=2023-05-01")
     }
+    if (-not $script:skuCatalog.Succeeded) {
+        Add-Prerequisite -Area 'Region' -Item $item -Status 'Not verified' -Detail $script:skuCatalog.Error
+        return
+    }
+    $regionKey = ConvertTo-Key $Region
+    $offer = @(Get-Property $script:skuCatalog.Value 'value') | Where-Object {
+        (Get-Property $_ 'name') -eq $SkuName -and (Get-Property $_ 'kind') -eq $Kind -and
+        (@(Get-Property $_ 'locations' | ForEach-Object { ConvertTo-Key $_ }) -contains $regionKey)
+    } | Select-Object -First 1
+    $restricted = $offer -and @(Get-Property $offer 'restrictions' | Where-Object {
+        @(Get-Property $_ 'values' | ForEach-Object { ConvertTo-Key $_ }) -contains $regionKey
+    }).Count -gt 0
+    if ($offer -and -not $restricted) {
+        Add-Prerequisite -Area 'Region' -Item $item -Status 'Ready' -Detail "Available for $Purpose."
+    } else {
+        Add-Prerequisite -Area 'Region' -Item $item -Status 'Action required' -Detail "Not available for $Purpose; choose another SKU or region."
+    }
+}
+
+if (-not $isExistingProfile -and $primaryLocation -and $secondaryLocation) {
+    Test-StorageSku -SkuName 'Standard_ZRS' -Kind 'StorageV2' -Region $primaryLocation -Purpose 'primary storage accounts and zone-redundant ACR'
+    Test-StorageSku -SkuName 'Standard_LRS' -Kind 'StorageV2' -Region $secondaryLocation -Purpose 'secondary storage accounts'
 }
 
 if ($isExistingProfile -and -not $hasPlaceholders) {
@@ -244,73 +260,272 @@ if ($isExistingProfile -and -not $hasPlaceholders) {
         }
     }
 
+    function ConvertTo-CidrRange([string]$Cidr) {
+        if ($Cidr -notmatch '^(\d{1,3}(?:\.\d{1,3}){3})/(\d{1,2})$') {
+            return $null
+        }
+        $length = [int]$Matches[2]
+        $address = $null
+        if ($length -gt 32 -or -not [System.Net.IPAddress]::TryParse($Matches[1], [ref]$address)) {
+            return $null
+        }
+        $bytes = $address.GetAddressBytes()
+        $value = ([double]$bytes[0] * 16777216) + ([double]$bytes[1] * 65536) + ([double]$bytes[2] * 256) + [double]$bytes[3]
+        $size = [math]::Pow(2, 32 - $length)
+        $start = [math]::Floor($value / $size) * $size
+        return [pscustomobject]@{ Start = $start; End = $start + $size - 1; Length = $length }
+    }
+
+    function Test-CidrOverlap($First, $Second) {
+        return $First.Start -le $Second.End -and $Second.Start -le $First.End
+    }
+
+    function Get-DnsZoneState([string]$ZoneId, [string]$VnetId) {
+        $zoneSubscription = if ($ZoneId -match '(?i)^/subscriptions/([^/]+)/') { $Matches[1] } else { $subscriptionId }
+        $zoneGroup = if ($ZoneId -match '(?i)/resourceGroups/([^/]+)/') { $Matches[1] } else { '' }
+        $zoneName = ($ZoneId.TrimEnd('/') -split '/')[-1]
+        $links = Invoke-Az -Arguments @('network', 'private-dns', 'link', 'vnet', 'list', '--subscription', $zoneSubscription, '--resource-group', $zoneGroup, '--zone-name', $zoneName)
+        if (-not $links.Succeeded) {
+            return [pscustomobject]@{ Status = 'Not verified'; Detail = "Could not read the links of zone $zoneName. $($links.Error)" }
+        }
+        if (@($links.Value | ForEach-Object { ConvertTo-Key (Get-Property $_ 'virtualNetwork.id') }) -contains (ConvertTo-Key $VnetId)) {
+            return [pscustomobject]@{ Status = 'Ready'; Detail = "Zone $zoneName in $zoneGroup receives the records and is linked to the VNet." }
+        }
+        return [pscustomobject]@{ Status = 'Action required'; Detail = "Zone $zoneName in $zoneGroup isn't linked to the VNet, so the job can't resolve the records it receives." }
+    }
+
+    $workloadGroup = [string](Get-ParameterValue 'resourceGroupName')
+    $registryMode = [string](Get-ParameterValue 'registryMode')
+    $registryEndpointsEnabled = [bool](Get-ParameterValue 'registryPrivateEndpointsEnabled')
+    $storageModes = @{}
+    $networkModes = @{}
+    foreach ($role in 'primary', 'secondary') {
+        $storageModes[$role] = [string](Get-ParameterValue "${role}StorageMode")
+        $networkModes[$role] = [string](Get-ParameterValue "${role}NetworkMode")
+    }
+
+    # Mirrors the endpoint rules in existing.bicep: every new service and every new VNet gets endpoints, plus the listed ones.
+    $plans = @{}
+    foreach ($role in 'primary', 'secondary') {
+        $networkIsNew = $networkModes[$role] -eq 'new'
+        $requested = @(Get-ParameterValue "${role}EndpointsToCreate")
+        $plans[$role] = @{
+            primary   = $networkIsNew -or $storageModes['primary'] -eq 'new' -or $requested -contains 'primaryStorage'
+            secondary = $networkIsNew -or $storageModes['secondary'] -eq 'new' -or $requested -contains 'secondaryStorage'
+            registry  = $registryEndpointsEnabled -and ($networkIsNew -or $registryMode -eq 'new' -or $requested -contains 'registry')
+        }
+    }
+
+    $allVnets = $null
     $sides = @{}
     foreach ($role in 'primary', 'secondary') {
-        $accountName = Get-ParameterValue "${role}StorageAccountName"
-        $accountGroup = Get-ParameterValue "${role}StorageResourceGroupName"
-        $shareName = Get-ParameterValue "${role}FileShareName"
-        $vnetName = Get-ParameterValue "${role}VnetName"
-        $vnetGroup = Get-ParameterValue "${role}VnetResourceGroupName"
-        $subnetName = Get-ParameterValue "${role}InfrastructureSubnetName"
         $expectedLocation = Get-ParameterValue "${role}Location"
-        $side = [pscustomobject]@{ Role = $role; AccountName = $accountName; Account = $null; Share = $null; Vnet = $null; FileEndpoints = @() }
+        $regionCode = Get-ParameterValue "${role}RegionCode"
+        $side = [pscustomobject]@{ Role = $role; StorageMode = $storageModes[$role]; NetworkMode = $networkModes[$role]; AccountName = ''; Account = $null; Share = $null; Vnet = $null; FileEndpoints = @() }
+        $plan = $plans[$role]
 
-        $accountResult = Invoke-Az -Arguments @('storage', 'account', 'show', '--name', $accountName, '--resource-group', $accountGroup)
-        if ($accountResult.Succeeded) {
-            $side.Account = $accountResult.Value
-            $accountDetail = "kind=$(Get-Property $side.Account 'kind'), sku=$(Get-Property $side.Account 'sku.name'), publicNetworkAccess=$(Get-Property $side.Account 'publicNetworkAccess')"
-            if ((ConvertTo-Key (Get-Property $side.Account 'location')) -ne (ConvertTo-Key $expectedLocation)) {
-                Add-Prerequisite -Area 'Storage' -Item "$role account $accountName" -Status 'Warning' -Detail "Located in $(Get-Property $side.Account 'location'), but the parameter file uses $expectedLocation. $accountDetail"
-            } else {
-                Add-Prerequisite -Area 'Storage' -Item "$role account $accountName" -Status 'Ready' -Detail $accountDetail
+        if ($side.StorageMode -eq 'new') {
+            $accountName = [string](Get-ParameterValue "${role}StorageAccountName")
+            $skuName = [string](Get-ParameterValue "${role}StorageSkuName")
+            $shareName = [string](Get-ParameterValue "${role}FileShareName")
+            if (-not $shareName) {
+                $shareName = 'replication'
             }
-            $side.FileEndpoints = @(Get-ApprovedEndpoints $side.Account 'file')
-
-            $shareResult = Invoke-Az -Arguments @('storage', 'share-rm', 'show', '--resource-group', $accountGroup, '--storage-account', $accountName, '--name', $shareName, '--expand', 'stats')
-            if ($shareResult.Succeeded) {
-                $side.Share = $shareResult.Value
-                $protocol = Get-Property $side.Share 'enabledProtocols'
-                $usedGiB = [math]::Round([double](Get-Property $side.Share 'shareUsageBytes') / 1GB, 2)
-                $shareDetail = "protocol=$protocol, quota=$(Get-Property $side.Share 'shareQuota') GiB, used=$usedGiB GiB"
-                if ($protocol -and $protocol -ne 'SMB') {
-                    Add-Prerequisite -Area 'Storage' -Item "$role share $shareName" -Status 'Action required' -Detail "Only SMB shares are supported. $shareDetail"
+            $kind = if ($skuName -like 'Premium*') { 'FileStorage' } else { 'StorageV2' }
+            $side.AccountName = if ($accountName) { $accountName } else { "new $role account" }
+            $newDetail = "The deployment creates a $kind $skuName account$(if ($accountName) { " named $accountName" } else { ' with a generated name' }) and SMB share $shareName in $workloadGroup."
+            $item = "$role account $(if ($accountName) { $accountName } else { '(new)' })"
+            if ($accountName) {
+                $created = Invoke-Az -Arguments @('storage', 'account', 'show', '--name', $accountName, '--resource-group', $workloadGroup)
+                if ($created.Succeeded) {
+                    Add-Prerequisite -Area 'Storage' -Item $item -Status 'Ready' -Detail 'Created by an earlier deployment of this template.'
                 } else {
-                    Add-Prerequisite -Area 'Storage' -Item "$role share $shareName" -Status 'Ready' -Detail $shareDetail
+                    $availability = Invoke-Az -Arguments @('storage', 'account', 'check-name', '--name', $accountName)
+                    if (-not $availability.Succeeded) {
+                        Add-Prerequisite -Area 'Storage' -Item $item -Status 'Not verified' -Detail "Could not check the name. $($availability.Error)"
+                    } elseif ((Get-Property $availability.Value 'nameAvailable') -eq $false) {
+                        Add-Prerequisite -Area 'Storage' -Item $item -Status 'Action required' -Detail "The name isn't available: $(Get-Property $availability.Value 'message') Choose another name, or leave ${role}StorageAccountName empty to generate one."
+                    } else {
+                        Add-Prerequisite -Area 'Storage' -Item $item -Status 'To be created' -Detail $newDetail
+                    }
                 }
             } else {
-                Add-LookupFailure -Area 'Storage' -Item "$role share $shareName" -Result $shareResult -MissingDetail "Share not found in account $accountName."
+                Add-Prerequisite -Area 'Storage' -Item $item -Status 'To be created' -Detail $newDetail
             }
+            Test-StorageSku -SkuName $skuName -Kind $kind -Region $expectedLocation -Purpose "the new $role storage account"
         } else {
-            Add-LookupFailure -Area 'Storage' -Item "$role account $accountName" -Result $accountResult -MissingDetail "Not found in resource group $accountGroup of subscription $subscriptionId."
-        }
+            $accountName = Get-ParameterValue "${role}StorageAccountName"
+            $accountGroup = Get-ParameterValue "${role}StorageResourceGroupName"
+            $shareName = Get-ParameterValue "${role}FileShareName"
+            $side.AccountName = $accountName
+            $accountResult = Invoke-Az -Arguments @('storage', 'account', 'show', '--name', $accountName, '--resource-group', $accountGroup)
+            if ($accountResult.Succeeded) {
+                $side.Account = $accountResult.Value
+                $accountDetail = "kind=$(Get-Property $side.Account 'kind'), sku=$(Get-Property $side.Account 'sku.name'), publicNetworkAccess=$(Get-Property $side.Account 'publicNetworkAccess')"
+                if ((ConvertTo-Key (Get-Property $side.Account 'location')) -ne (ConvertTo-Key $expectedLocation)) {
+                    Add-Prerequisite -Area 'Storage' -Item "$role account $accountName" -Status 'Warning' -Detail "Located in $(Get-Property $side.Account 'location'), but the parameter file uses $expectedLocation. $accountDetail"
+                } else {
+                    Add-Prerequisite -Area 'Storage' -Item "$role account $accountName" -Status 'Ready' -Detail $accountDetail
+                }
+                $side.FileEndpoints = @(Get-ApprovedEndpoints $side.Account 'file')
 
-        $vnetResult = Invoke-Az -Arguments @('network', 'vnet', 'show', '--resource-group', $vnetGroup, '--name', $vnetName)
-        if ($vnetResult.Succeeded) {
-            $side.Vnet = $vnetResult.Value
-            Add-Prerequisite -Area 'Network' -Item "$role VNet $vnetName" -Status 'Ready' -Detail "location=$(Get-Property $side.Vnet 'location')"
-        } else {
-            Add-LookupFailure -Area 'Network' -Item "$role VNet $vnetName" -Result $vnetResult -MissingDetail "Not found in resource group $vnetGroup."
-        }
-
-        $subnetResult = Invoke-Az -Arguments @('network', 'vnet', 'subnet', 'show', '--resource-group', $vnetGroup, '--vnet-name', $vnetName, '--name', $subnetName)
-        if ($subnetResult.Succeeded) {
-            $subnet = $subnetResult.Value
-            $prefix = @(@(Get-Property $subnet 'addressPrefix') + @(Get-Property $subnet 'addressPrefixes') | Where-Object { $_ }) | Select-Object -First 1
-            $prefixLength = if ($prefix -match '/(\d+)$') { [int]$Matches[1] } else { $null }
-            $delegations = @(Get-Property $subnet 'delegations' | ForEach-Object { Get-Property $_ 'serviceName' })
-            $links = @(Get-Property $subnet 'serviceAssociationLinks' | ForEach-Object { Get-Property $_ 'link' } | Where-Object { $_ })
-            $subnetItem = "$role Container Apps subnet $subnetName"
-            if ($delegations -notcontains 'Microsoft.App/environments') {
-                Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'Action required' -Detail "Delegate the subnet to Microsoft.App/environments. prefix=$prefix"
-            } elseif ($null -ne $prefixLength -and $prefixLength -gt 23) {
-                Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'Warning' -Detail "prefix=$prefix is smaller than the documented /23."
-            } elseif ($links.Count -gt 0) {
-                Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'Warning' -Detail "Already used by $($links -join ', '). Expected only when redeploying this solution."
+                $shareResult = Invoke-Az -Arguments @('storage', 'share-rm', 'show', '--resource-group', $accountGroup, '--storage-account', $accountName, '--name', $shareName, '--expand', 'stats')
+                if ($shareResult.Succeeded) {
+                    $side.Share = $shareResult.Value
+                    $protocol = Get-Property $side.Share 'enabledProtocols'
+                    $usedGiB = [math]::Round([double](Get-Property $side.Share 'shareUsageBytes') / 1GB, 2)
+                    $shareDetail = "protocol=$protocol, quota=$(Get-Property $side.Share 'shareQuota') GiB, used=$usedGiB GiB"
+                    if ($protocol -and $protocol -ne 'SMB') {
+                        Add-Prerequisite -Area 'Storage' -Item "$role share $shareName" -Status 'Action required' -Detail "Only SMB shares are supported. $shareDetail"
+                    } else {
+                        Add-Prerequisite -Area 'Storage' -Item "$role share $shareName" -Status 'Ready' -Detail $shareDetail
+                    }
+                } else {
+                    Add-LookupFailure -Area 'Storage' -Item "$role share $shareName" -Result $shareResult -MissingDetail "Share not found in account $accountName."
+                }
             } else {
-                Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'Ready' -Detail "prefix=$prefix, delegated, not in use."
+                Add-LookupFailure -Area 'Storage' -Item "$role account $accountName" -Result $accountResult -MissingDetail "Not found in resource group $accountGroup of subscription $subscriptionId. Set ${role}StorageMode to new to create one."
+            }
+        }
+
+        $vnetName = [string](Get-ParameterValue "${role}VnetName")
+        $vnetGroup = [string](Get-ParameterValue "${role}VnetResourceGroupName")
+        $subnetName = [string](Get-ParameterValue "${role}InfrastructureSubnetName")
+        if ($side.NetworkMode -eq 'new') {
+            $prefix = [string](Get-ParameterValue "${role}VnetAddressPrefix")
+            $range = ConvertTo-CidrRange $prefix
+            $dnsGroup = Get-ParameterValue "${role}DnsResourceGroupName"
+            if (-not $dnsGroup) {
+                $dnsGroup = "$workloadGroup-$regionCode-dns"
+            }
+            $newVnetName = if ($vnetName) { $vnetName } else { "vnet-replication-$regionCode" }
+            $item = "$role VNet $newVnetName (new)"
+            if (-not $range -or $range.Length -gt 22) {
+                Add-Prerequisite -Area 'Network' -Item $item -Status 'Action required' -Detail "${role}VnetAddressPrefix '$prefix' must be an IPv4 range of /22 or larger."
+            } else {
+                Add-Prerequisite -Area 'Network' -Item $item -Status 'To be created' -Detail "The deployment creates $newVnetName ($prefix) in $workloadGroup with a delegated /23 job subnet, an endpoint subnet, private endpoints for the storage accounts and registry, and private DNS zones in $dnsGroup."
+                if ($null -eq $allVnets) {
+                    $allVnets = @((Invoke-Az -Arguments @('network', 'vnet', 'list')).Value | Where-Object { $_ })
+                }
+                $overlapping = @($allVnets | Where-Object {
+                    $candidate = $_
+                    (ConvertTo-Key (Get-Property $candidate 'name')) -ne (ConvertTo-Key $newVnetName) -and
+                    @(Get-Property $candidate 'addressSpace.addressPrefixes' | ForEach-Object { ConvertTo-CidrRange $_ } | Where-Object { $_ -and (Test-CidrOverlap $_ $range) }).Count -gt 0
+                } | ForEach-Object { Get-Property $_ 'name' })
+                if ($overlapping.Count -gt 0) {
+                    Add-Prerequisite -Area 'Network' -Item "$role VNet address space" -Status 'Warning' -Detail "$prefix overlaps $($overlapping -join ', '). The replication VNets aren't peered, but choose another range if you plan to connect them."
+                }
             }
         } else {
-            Add-LookupFailure -Area 'Network' -Item "$role Container Apps subnet $subnetName" -Result $subnetResult -MissingDetail "Not found in VNet $vnetName."
+            $vnetResult = Invoke-Az -Arguments @('network', 'vnet', 'show', '--resource-group', $vnetGroup, '--name', $vnetName)
+            if ($vnetResult.Succeeded) {
+                $side.Vnet = $vnetResult.Value
+                $vnetLocation = Get-Property $side.Vnet 'location'
+                if ((ConvertTo-Key $vnetLocation) -ne (ConvertTo-Key $expectedLocation)) {
+                    Add-Prerequisite -Area 'Network' -Item "$role VNet $vnetName" -Status 'Action required' -Detail "Located in $vnetLocation, but ${role}Location is $expectedLocation. The job environment and its endpoints must be in the VNet's region."
+                } else {
+                    Add-Prerequisite -Area 'Network' -Item "$role VNet $vnetName" -Status 'Ready' -Detail "location=$vnetLocation"
+                }
+            } else {
+                Add-LookupFailure -Area 'Network' -Item "$role VNet $vnetName" -Result $vnetResult -MissingDetail "Not found in resource group $vnetGroup. Set ${role}NetworkMode to new to create a dedicated VNet."
+            }
+
+            if ($side.NetworkMode -eq 'existing') {
+                $subnetResult = Invoke-Az -Arguments @('network', 'vnet', 'subnet', 'show', '--resource-group', $vnetGroup, '--vnet-name', $vnetName, '--name', $subnetName)
+                if ($subnetResult.Succeeded) {
+                    $subnet = $subnetResult.Value
+                    $prefix = @(@(Get-Property $subnet 'addressPrefix') + @(Get-Property $subnet 'addressPrefixes') | Where-Object { $_ }) | Select-Object -First 1
+                    $prefixLength = if ($prefix -match '/(\d+)$') { [int]$Matches[1] } else { $null }
+                    $delegations = @(Get-Property $subnet 'delegations' | ForEach-Object { Get-Property $_ 'serviceName' })
+                    $links = @(Get-Property $subnet 'serviceAssociationLinks' | ForEach-Object { Get-Property $_ 'link' } | Where-Object { $_ })
+                    $subnetItem = "$role Container Apps subnet $subnetName"
+                    if ($delegations -notcontains 'Microsoft.App/environments') {
+                        Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'Action required' -Detail "Delegate the subnet to Microsoft.App/environments. prefix=$prefix"
+                    } elseif ($null -ne $prefixLength -and $prefixLength -gt 23) {
+                        Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'Warning' -Detail "prefix=$prefix is smaller than the documented /23."
+                    } elseif ($links.Count -gt 0) {
+                        Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'Warning' -Detail "Already used by $($links -join ', '). Expected only when redeploying this solution."
+                    } else {
+                        Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'Ready' -Detail "prefix=$prefix, delegated, not in use."
+                    }
+                } else {
+                    Add-LookupFailure -Area 'Network' -Item "$role Container Apps subnet $subnetName" -Result $subnetResult -MissingDetail "Not found in VNet $vnetName. Set ${role}NetworkMode to newSubnet to add one."
+                }
+            } else {
+                if (-not $subnetName) {
+                    $subnetName = 'snet-replication-jobs'
+                }
+                $prefix = [string](Get-ParameterValue "${role}InfrastructureSubnetPrefix")
+                $range = ConvertTo-CidrRange $prefix
+                $subnetItem = "$role Container Apps subnet $subnetName (new)"
+                if (-not $side.Vnet) {
+                    Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'Not verified' -Detail 'The VNet lookup failed.'
+                } else {
+                    $subnets = @(Get-Property $side.Vnet 'subnets' | Where-Object { $_ })
+                    $sameName = @($subnets | Where-Object { (Get-Property $_ 'name') -eq $subnetName }) | Select-Object -First 1
+                    if ($sameName) {
+                        $samePrefix = @(@(Get-Property $sameName 'addressPrefix') + @(Get-Property $sameName 'addressPrefixes') | Where-Object { $_ }) -contains $prefix
+                        if ($samePrefix -and @(Get-Property $sameName 'delegations' | ForEach-Object { Get-Property $_ 'serviceName' }) -contains 'Microsoft.App/environments') {
+                            Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'Ready' -Detail 'Created by an earlier deployment of this template.'
+                        } else {
+                            Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'Action required' -Detail "A different subnet named $subnetName already exists in $vnetName; set ${role}InfrastructureSubnetName to another name."
+                        }
+                    } elseif (-not $range -or $range.Length -gt 27) {
+                        Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'Action required' -Detail "${role}InfrastructureSubnetPrefix '$prefix' must be an IPv4 range of /27 or larger."
+                    } else {
+                        $spaces = @(Get-Property $side.Vnet 'addressSpace.addressPrefixes')
+                        $inside = @($spaces | ForEach-Object { ConvertTo-CidrRange $_ } | Where-Object { $_ -and $_.Start -le $range.Start -and $range.End -le $_.End }).Count -gt 0
+                        $conflicts = @($subnets | Where-Object {
+                            @(@(Get-Property $_ 'addressPrefix') + @(Get-Property $_ 'addressPrefixes') | Where-Object { $_ } | ForEach-Object { ConvertTo-CidrRange $_ } | Where-Object { $_ -and (Test-CidrOverlap $_ $range) }).Count -gt 0
+                        } | ForEach-Object { Get-Property $_ 'name' })
+                        if (-not $inside) {
+                            Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'Action required' -Detail "$prefix is outside the VNet address space ($($spaces -join ', '))."
+                        } elseif ($conflicts.Count -gt 0) {
+                            Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'Action required' -Detail "$prefix overlaps subnet $($conflicts -join ', ')."
+                        } else {
+                            $sizeNote = if ($range.Length -gt 23) { ' It is smaller than the documented /23.' } else { '' }
+                            Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'To be created' -Detail "The deployment adds $subnetName ($prefix), delegated to Microsoft.App/environments, to $vnetName. Add it to any other IaC that manages this VNet so that a later deployment doesn't remove it.$sizeNote"
+                        }
+                    }
+                }
+            }
+
+            $targets = @(
+                if ($plan.primary) { 'primary storage' }
+                if ($plan.secondary) { 'secondary storage' }
+                if ($plan.registry) { 'registry' }
+            )
+            if ($targets.Count -gt 0) {
+                $endpointSubnetName = [string](Get-ParameterValue "${role}PrivateEndpointSubnetName")
+                $endpointItem = "$role endpoint subnet $endpointSubnetName"
+                if (-not $endpointSubnetName) {
+                    Add-Prerequisite -Area 'Network' -Item "$role endpoint subnet" -Status 'Action required' -Detail "The deployment creates endpoints for the $($targets -join ', ') in this VNet; set ${role}PrivateEndpointSubnetName."
+                } elseif ($side.Vnet) {
+                    $endpointSubnet = @(Get-Property $side.Vnet 'subnets' | Where-Object { $_ -and (Get-Property $_ 'name') -eq $endpointSubnetName }) | Select-Object -First 1
+                    if (-not $endpointSubnet) {
+                        Add-Prerequisite -Area 'Network' -Item $endpointItem -Status 'Action required' -Detail "Not found in VNet $vnetName."
+                    } elseif (@(Get-Property $endpointSubnet 'delegations' | Where-Object { $_ }).Count -gt 0) {
+                        Add-Prerequisite -Area 'Network' -Item $endpointItem -Status 'Action required' -Detail 'Private endpoints cannot use a delegated subnet.'
+                    } else {
+                        Add-Prerequisite -Area 'Network' -Item $endpointItem -Status 'To be created' -Detail "The deployment creates endpoints for the $($targets -join ', ') in this subnet."
+                    }
+                }
+                foreach ($zone in @(
+                        @{ Needed = $plan.primary -or $plan.secondary; Parameter = "${role}FileDnsZoneId"; Label = 'file' },
+                        @{ Needed = $plan.registry; Parameter = "${role}RegistryDnsZoneId"; Label = 'registry' })) {
+                    if (-not $zone.Needed) {
+                        continue
+                    }
+                    $zoneId = [string](Get-ParameterValue $zone.Parameter)
+                    $zoneItem = "$role $($zone.Label) DNS zone for new endpoints"
+                    if (-not $zoneId) {
+                        Add-Prerequisite -Area 'Network' -Item $zoneItem -Status 'Warning' -Detail "$($zone.Parameter) is empty, so policy or another process must create the DNS records for the new $($zone.Label) endpoints."
+                    } elseif ($side.Vnet) {
+                        $zoneState = Get-DnsZoneState -ZoneId $zoneId -VnetId (Get-Property $side.Vnet 'id')
+                        Add-Prerequisite -Area 'Network' -Item $zoneItem -Status $zoneState.Status -Detail $zoneState.Detail
+                    }
+                }
+            }
         }
         $sides[$role] = $side
     }
@@ -324,40 +539,68 @@ if ($isExistingProfile -and -not $hasPlaceholders) {
         if ($destinationQuotaBytes -lt $sourceBytes) {
             Add-Prerequisite -Area 'Storage' -Item 'Destination share capacity' -Status 'Action required' -Detail 'The secondary share quota is smaller than the data in the primary share.'
         } elseif ($destinationBytes -gt 0) {
-            Add-Prerequisite -Area 'Storage' -Item 'Destination share contents' -Status 'Warning' -Detail "The secondary share already holds $([math]::Round($destinationBytes / 1GB, 2)) GiB; replication merges into it and never deletes extra files."
+            $held = if ($destinationBytes -ge 1GB) { "$([math]::Round($destinationBytes / 1GB, 2)) GiB" } elseif ($destinationBytes -ge 1MB) { "$([math]::Round($destinationBytes / 1MB, 2)) MiB" } else { "$destinationBytes bytes" }
+            Add-Prerequisite -Area 'Storage' -Item 'Destination share contents' -Status 'Warning' -Detail "The secondary share already holds $held; replication merges into it and never deletes extra files."
         } else {
             Add-Prerequisite -Area 'Storage' -Item 'Destination share capacity' -Status 'Ready' -Detail 'The secondary share is empty and has enough quota for the primary data.'
         }
     }
 
-    $registryName = Get-ParameterValue 'registryName'
-    $registryResult = Invoke-Az -Arguments @('acr', 'show', '--name', $registryName, '--resource-group', (Get-ParameterValue 'registryResourceGroupName'))
     $registry = $null
-    if ($registryResult.Succeeded) {
-        $registry = $registryResult.Value
-        $registryDetail = "sku=$(Get-Property $registry 'sku.name'), publicNetworkAccess=$(Get-Property $registry 'publicNetworkAccess')"
-        if ((Get-Property $registry 'roleAssignmentMode') -match '(?i)abac') {
-            Add-Prerequisite -Area 'Registry' -Item $registryName -Status 'Warning' -Detail "ABAC repository permissions are enabled, so AcrPull is not honored; assign Container Registry Repository Reader to both job identities. $registryDetail"
-        } else {
-            Add-Prerequisite -Area 'Registry' -Item $registryName -Status 'Ready' -Detail $registryDetail
-        }
-
-        $image = [string](Get-ParameterValue 'containerImage')
-        $loginServer = [string](Get-Property $registry 'loginServer')
-        if ($image -notmatch '@sha256:[a-fA-F0-9]{64}$') {
-            Add-Prerequisite -Area 'Registry' -Item 'containerImage' -Status 'Action required' -Detail 'Pin the image by digest: <registry>.azurecr.io/<repository>@sha256:<digest>.'
-        } elseif (-not $image.StartsWith("$loginServer/", [StringComparison]::OrdinalIgnoreCase)) {
-            Add-Prerequisite -Area 'Registry' -Item 'containerImage' -Status 'Action required' -Detail "The image is not in $loginServer."
-        } else {
-            $manifest = Invoke-Az -Arguments @('acr', 'manifest', 'show-metadata', $image, '--registry', $registryName)
-            if ($manifest.Succeeded) {
-                Add-Prerequisite -Area 'Registry' -Item 'containerImage' -Status 'Ready' -Detail 'Digest found in the registry.'
+    $registryName = [string](Get-ParameterValue 'registryName')
+    if ($registryMode -eq 'new') {
+        $item = "Registry $(if ($registryName) { $registryName } else { '(new)' })"
+        $newDetail = "The deployment creates a Premium registry$(if ($registryName) { " named $registryName" } else { ' with a generated name' }) in $primaryLocation with a replica in $secondaryLocation. scripts/deploy.ps1 builds the AzCopy image into it."
+        if ($registryName) {
+            $created = Invoke-Az -Arguments @('acr', 'show', '--name', $registryName, '--resource-group', $workloadGroup)
+            if ($created.Succeeded) {
+                Add-Prerequisite -Area 'Registry' -Item $item -Status 'Ready' -Detail 'Created by an earlier deployment of this template.'
             } else {
-                Add-Prerequisite -Area 'Registry' -Item 'containerImage' -Status 'Not verified' -Detail "Could not read the manifest from this host. $($manifest.Error)"
+                $availability = Invoke-Az -Arguments @('acr', 'check-name', '--name', $registryName)
+                if (-not $availability.Succeeded) {
+                    Add-Prerequisite -Area 'Registry' -Item $item -Status 'Not verified' -Detail "Could not check the name. $($availability.Error)"
+                } elseif ((Get-Property $availability.Value 'nameAvailable') -eq $false) {
+                    Add-Prerequisite -Area 'Registry' -Item $item -Status 'Action required' -Detail "The name isn't available: $(Get-Property $availability.Value 'message') Choose another name, or leave registryName empty to generate one."
+                } else {
+                    Add-Prerequisite -Area 'Registry' -Item $item -Status 'To be created' -Detail $newDetail
+                }
             }
+        } else {
+            Add-Prerequisite -Area 'Registry' -Item $item -Status 'To be created' -Detail $newDetail
         }
     } else {
-        Add-LookupFailure -Area 'Registry' -Item $registryName -Result $registryResult -MissingDetail 'Registry not found in the current subscription.'
+        $registryResult = Invoke-Az -Arguments @('acr', 'show', '--name', $registryName, '--resource-group', (Get-ParameterValue 'registryResourceGroupName'))
+        if ($registryResult.Succeeded) {
+            $registry = $registryResult.Value
+            $registrySku = [string](Get-Property $registry 'sku.name')
+            $registryDetail = "sku=$registrySku, publicNetworkAccess=$(Get-Property $registry 'publicNetworkAccess')"
+            if ((Get-Property $registry 'roleAssignmentMode') -match '(?i)abac') {
+                Add-Prerequisite -Area 'Registry' -Item $registryName -Status 'Warning' -Detail "ABAC repository permissions are enabled, so AcrPull is not honored; assign Container Registry Repository Reader to both job identities. $registryDetail"
+            } elseif ($registrySku -ne 'Premium' -and ($plans['primary'].registry -or $plans['secondary'].registry)) {
+                Add-Prerequisite -Area 'Registry' -Item $registryName -Status 'Action required' -Detail "A $registrySku registry doesn't support private endpoints, but the deployment would create one. Set registryPrivateEndpointsEnabled to false so that the jobs use its public endpoint. $registryDetail"
+            } else {
+                Add-Prerequisite -Area 'Registry' -Item $registryName -Status 'Ready' -Detail $registryDetail
+            }
+
+            $image = [string](Get-ParameterValue 'containerImage')
+            $loginServer = [string](Get-Property $registry 'loginServer')
+            if ($image -eq [string](Get-Property (Get-Property $templateParameters 'containerImage') 'defaultValue')) {
+                Add-Prerequisite -Area 'Registry' -Item 'containerImage' -Status 'Warning' -Detail 'Not set. scripts/deploy.ps1 builds and pins the image unless you pass -ContainerImage; a direct deployment needs a digest-pinned image in the registry.'
+            } elseif ($image -notmatch '@sha256:[a-fA-F0-9]{64}$') {
+                Add-Prerequisite -Area 'Registry' -Item 'containerImage' -Status 'Action required' -Detail 'Pin the image by digest: <registry>.azurecr.io/<repository>@sha256:<digest>.'
+            } elseif (-not $image.StartsWith("$loginServer/", [StringComparison]::OrdinalIgnoreCase)) {
+                Add-Prerequisite -Area 'Registry' -Item 'containerImage' -Status 'Action required' -Detail "The image is not in $loginServer."
+            } else {
+                $manifest = Invoke-Az -Arguments @('acr', 'manifest', 'show-metadata', $image, '--registry', $registryName)
+                if ($manifest.Succeeded) {
+                    Add-Prerequisite -Area 'Registry' -Item 'containerImage' -Status 'Ready' -Detail 'Digest found in the registry.'
+                } else {
+                    Add-Prerequisite -Area 'Registry' -Item 'containerImage' -Status 'Not verified' -Detail "Could not read the manifest from this host. $($manifest.Error)"
+                }
+            }
+        } else {
+            Add-LookupFailure -Area 'Registry' -Item $registryName -Result $registryResult -MissingDetail 'Registry not found in the current subscription. Set registryMode to new to create one.'
+        }
     }
 
     $zones = Invoke-Az -Arguments @('network', 'private-dns', 'zone', 'list')
@@ -367,33 +610,48 @@ if ($isExistingProfile -and -not $hasPlaceholders) {
     foreach ($direction in @(@{ Job = $primary; Destination = $secondary }, @{ Job = $secondary; Destination = $primary })) {
         $job = $direction.Job
         $destination = $direction.Destination
+        $plan = $plans[$job.Role]
+        $sourceCreated = $plan[$job.Role]
+        $destinationCreated = $plan[$destination.Role]
         $item = "$($job.Role) job copy path ($($job.AccountName) to $($destination.AccountName))"
-        if (-not $job.Vnet -or -not $job.Account -or -not $destination.Account) {
+        if ($sourceCreated -and $destinationCreated) {
+            Add-Prerequisite -Area 'Network' -Item $item -Status 'Ready' -Detail 'Local-endpoint layout: the deployment creates file endpoints for both accounts in the job VNet.'
+            continue
+        }
+        if (-not $job.Vnet -or (-not $sourceCreated -and -not $job.Account) -or (-not $destinationCreated -and -not $destination.Account)) {
             Add-Prerequisite -Area 'Network' -Item $item -Status 'Not verified' -Detail 'A storage account or VNet lookup failed.'
             continue
         }
 
         $jobVnetId = ConvertTo-Key (Get-Property $job.Vnet 'id')
         $peeredVnetIds = @(Get-Property $job.Vnet 'virtualNetworkPeerings' | Where-Object { (Get-Property $_ 'peeringState') -eq 'Connected' } | ForEach-Object { ConvertTo-Key (Get-Property $_ 'remoteVirtualNetwork.id') })
-        $sourceLocal = @($job.FileEndpoints | Where-Object { $_.VnetId -eq $jobVnetId })
-        $destinationLocal = @($destination.FileEndpoints | Where-Object { $_.VnetId -eq $jobVnetId })
-        $destinationPeered = @($destination.FileEndpoints | Where-Object { $peeredVnetIds -contains $_.VnetId })
-
         $expected = @{}
-        if ($sourceLocal.Count -eq 0) {
-            Add-Prerequisite -Area 'Network' -Item $item -Status 'Action required' -Detail "No approved file private endpoint for $($job.AccountName) in the job VNet."
-            continue
-        } elseif ($destinationLocal.Count -gt 0) {
-            Add-Prerequisite -Area 'Network' -Item $item -Status 'Ready' -Detail 'Local-endpoint layout: the job VNet has approved file endpoints for both accounts.'
-            $expected[$destination.AccountName] = @($destinationLocal.Ips)
-        } elseif ($destinationPeered.Count -gt 0) {
-            Add-Prerequisite -Area 'Network' -Item $item -Status 'Ready' -Detail 'Direct-peering layout: the destination endpoint is in a directly peered VNet.'
-            $expected[$destination.AccountName] = @($destinationPeered.Ips)
-        } else {
-            Add-Prerequisite -Area 'Network' -Item $item -Status 'Action required' -Detail "No approved file endpoint for $($destination.AccountName) in the job VNet or a directly peered VNet. Hub or Virtual WAN transit fails with CannotVerifyCopySource."
-            continue
+        if (-not $sourceCreated) {
+            $sourceLocal = @($job.FileEndpoints | Where-Object { $_.VnetId -eq $jobVnetId })
+            if ($sourceLocal.Count -eq 0) {
+                Add-Prerequisite -Area 'Network' -Item $item -Status 'Action required' -Detail "No approved file private endpoint for $($job.AccountName) in the job VNet. Add $($job.Role)Storage to $($job.Role)EndpointsToCreate to create one."
+                continue
+            }
+            $expected[$job.AccountName] = @($sourceLocal.Ips)
         }
-        $expected[$job.AccountName] = @($sourceLocal.Ips)
+        $layout = 'Local-endpoint layout: the job VNet has approved file endpoints for both accounts.'
+        if (-not $destinationCreated) {
+            $destinationLocal = @($destination.FileEndpoints | Where-Object { $_.VnetId -eq $jobVnetId })
+            $destinationPeered = @($destination.FileEndpoints | Where-Object { $peeredVnetIds -contains $_.VnetId })
+            if ($destinationLocal.Count -gt 0) {
+                $expected[$destination.AccountName] = @($destinationLocal.Ips)
+            } elseif ($destinationPeered.Count -gt 0) {
+                $layout = 'Direct-peering layout: the destination endpoint is in a directly peered VNet.'
+                $expected[$destination.AccountName] = @($destinationPeered.Ips)
+            } else {
+                Add-Prerequisite -Area 'Network' -Item $item -Status 'Action required' -Detail "No approved file endpoint for $($destination.AccountName) in the job VNet or a directly peered VNet. Hub or Virtual WAN transit fails with CannotVerifyCopySource. Add $($destination.Role)Storage to $($job.Role)EndpointsToCreate to create one."
+                continue
+            }
+        }
+        if ($sourceCreated -or $destinationCreated) {
+            $layout = "$layout The deployment creates the endpoint for $(if ($sourceCreated) { $job.AccountName } else { $destination.AccountName })."
+        }
+        Add-Prerequisite -Area 'Network' -Item $item -Status 'Ready' -Detail $layout
 
         $dnsServers = @(Get-Property $job.Vnet 'dhcpOptions.dnsServers' | Where-Object { $_ })
         $dnsItem = "$($job.Role) job DNS for file endpoints"
@@ -427,21 +685,32 @@ if ($isExistingProfile -and -not $hasPlaceholders) {
         }
     }
 
-    if ($registry) {
-        foreach ($side in $primary, $secondary) {
-            $item = "$($side.Role) job registry path"
-            if (-not $side.Vnet) {
-                continue
+    foreach ($side in $primary, $secondary) {
+        $item = "$($side.Role) job registry path"
+        if ($plans[$side.Role].registry) {
+            Add-Prerequisite -Area 'Network' -Item $item -Status 'Ready' -Detail 'The deployment creates a registry private endpoint in the job VNet.'
+            continue
+        }
+        if (-not $registry) {
+            continue
+        }
+        $publicAccess = Get-Property $registry 'publicNetworkAccess'
+        if ($side.NetworkMode -eq 'new' -or -not $side.Vnet) {
+            if ($side.NetworkMode -eq 'new' -and $publicAccess -eq 'Enabled') {
+                Add-Prerequisite -Area 'Network' -Item $item -Status 'Ready' -Detail 'Public registry endpoint; the new job subnet reaches it through outbound HTTPS.'
+            } elseif ($side.NetworkMode -eq 'new') {
+                Add-Prerequisite -Area 'Network' -Item $item -Status 'Action required' -Detail 'The registry denies public access and registryPrivateEndpointsEnabled is false, so the new VNet has no path to it.'
             }
-            $jobVnetId = ConvertTo-Key (Get-Property $side.Vnet 'id')
-            $peeredVnetIds = @(Get-Property $side.Vnet 'virtualNetworkPeerings' | Where-Object { (Get-Property $_ 'peeringState') -eq 'Connected' } | ForEach-Object { ConvertTo-Key (Get-Property $_ 'remoteVirtualNetwork.id') })
-            if (@($registryEndpoints | Where-Object { $_.VnetId -eq $jobVnetId -or $peeredVnetIds -contains $_.VnetId }).Count -gt 0) {
-                Add-Prerequisite -Area 'Network' -Item $item -Status 'Ready' -Detail 'Approved registry private endpoint in the job VNet or a directly peered VNet.'
-            } elseif ((Get-Property $registry 'publicNetworkAccess') -eq 'Enabled') {
-                Add-Prerequisite -Area 'Network' -Item $item -Status 'Ready' -Detail 'Public registry endpoint; the job subnet needs outbound HTTPS access.'
-            } else {
-                Add-Prerequisite -Area 'Network' -Item $item -Status 'Action required' -Detail 'The registry denies public access and has no approved private endpoint reachable from the job VNet.'
-            }
+            continue
+        }
+        $jobVnetId = ConvertTo-Key (Get-Property $side.Vnet 'id')
+        $peeredVnetIds = @(Get-Property $side.Vnet 'virtualNetworkPeerings' | Where-Object { (Get-Property $_ 'peeringState') -eq 'Connected' } | ForEach-Object { ConvertTo-Key (Get-Property $_ 'remoteVirtualNetwork.id') })
+        if (@($registryEndpoints | Where-Object { $_.VnetId -eq $jobVnetId -or $peeredVnetIds -contains $_.VnetId }).Count -gt 0) {
+            Add-Prerequisite -Area 'Network' -Item $item -Status 'Ready' -Detail 'Approved registry private endpoint in the job VNet or a directly peered VNet.'
+        } elseif ($publicAccess -eq 'Enabled') {
+            Add-Prerequisite -Area 'Network' -Item $item -Status 'Ready' -Detail 'Public registry endpoint; the job subnet needs outbound HTTPS access.'
+        } else {
+            Add-Prerequisite -Area 'Network' -Item $item -Status 'Action required' -Detail "The registry denies public access and has no approved private endpoint reachable from the job VNet. Add registry to $($side.Role)EndpointsToCreate to create one."
         }
     }
 
@@ -501,6 +770,7 @@ if ($resources.Count -gt 0) {
 
 $summary = [ordered]@{
     PrerequisitesReady          = @($prerequisites | Where-Object Status -eq 'Ready').Count
+    PrerequisitesToBeCreated    = @($prerequisites | Where-Object Status -eq 'To be created').Count
     PrerequisitesActionRequired = @($prerequisites | Where-Object Status -eq 'Action required').Count
     PrerequisiteWarnings        = @($prerequisites | Where-Object Status -eq 'Warning').Count
     PrerequisitesNotVerified    = @($prerequisites | Where-Object Status -eq 'Not verified').Count
@@ -509,7 +779,7 @@ $summary = [ordered]@{
     WhatIf                      = $whatIfStatus
 }
 Write-Host 'Summary' -ForegroundColor Cyan
-Write-Host ("Prerequisites: {0} ready, {1} action required, {2} warnings, {3} not verified." -f $summary.PrerequisitesReady, $summary.PrerequisitesActionRequired, $summary.PrerequisiteWarnings, $summary.PrerequisitesNotVerified)
+Write-Host ("Prerequisites: {0} ready, {1} to be created, {2} action required, {3} warnings, {4} not verified." -f $summary.PrerequisitesReady, $summary.PrerequisitesToBeCreated, $summary.PrerequisitesActionRequired, $summary.PrerequisiteWarnings, $summary.PrerequisitesNotVerified)
 Write-Host ("Template resources: {0} existing, {1} to be provisioned (what-if: {2})." -f $summary.ResourcesExisting, $summary.ResourcesToProvision, $whatIfStatus)
 if ($summary.PrerequisitesActionRequired -gt 0) {
     Write-Host 'Resolve the Action required items before deploying.' -ForegroundColor Yellow
