@@ -281,7 +281,7 @@ pwsh ./scripts/deploy.ps1 `
        --yaml standby-dry-run.yaml
    ```
 
-   The log reports `AZURE_FILES_REPLICATION_DRY_RUN_COMPLETED` with `wouldCopy`, `wouldRemove`, and `wouldSetProperties` counts. Expect `wouldCopy` to include most replicated files: sync compares REST `Last-Modified` times, and replicated files carry their copy time. A real reverse run would therefore rewrite nearly every file in the primary share.
+   The log reports `AZURE_FILES_REPLICATION_DRY_RUN_COMPLETED` with `wouldCopy`, `wouldRemove`, and `wouldSetProperties` counts. Because the wrapper sets `--preserve-info=true`, sync compares SMB last-write times, which forward replication preserves on the destination. Expect `wouldCopy` to count files changed in the standby share and a few folders whose timestamps differ, not files that were replicated unchanged.
 
    > [!WARNING]
    > `DRY_RUN` requires an image built from a revision of `src/azcopy-job/run-sync.sh` that supports it. An older image ignores the variable and performs a real reverse synchronization.
@@ -342,7 +342,7 @@ Deployment changes Azure resources and is intentionally not run automatically fr
 
 ## Replication job settings
 
-`src/azcopy-job/run-sync.sh` runs `azcopy sync` with `--preserve-info=true`, `--include-root=true`, and `--force-if-read-only=true`. SMB timestamps and attributes, including those of the share root, are copied, and read-only destination files can be updated. AzCopy defaults `--preserve-info` to `false` for Linux SMB share-to-share copies, so the wrapper sets it explicitly.
+`src/azcopy-job/run-sync.sh` runs `azcopy sync` with `--preserve-info=true`, `--include-root=true`, and `--force-if-read-only=true`. SMB timestamps and attributes, including those of the share root, are copied, and read-only destination files can be updated. AzCopy defaults `--preserve-info` to `false` for Linux SMB share-to-share copies, so the wrapper sets it explicitly. With `--preserve-info=true`, sync compares SMB last-write times instead of REST `Last-Modified` times. Replicated files therefore keep their source time and aren't copied again in either direction unless they change.
 
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
@@ -431,4 +431,6 @@ pwsh ./scripts/switch-direction.ps1 `
 
 The switch script refuses to proceed while either job is running or when the deployed images differ or are not digest-pinned.
 
-The first run in the new direction recopies files that were replicated earlier, because sync compares `Last-Modified` times and replicated files carry their copy time. Plan time and egress for a full-share copy after each switch.
+The first run in the new direction copies only files whose SMB last-write time is newer than the destination copy, plus folder properties. Files that were replicated unchanged aren't recopied, because the wrapper preserves SMB timestamps and sync compares them. If both shares received writes to the same file, sync keeps the copy with the newer last-write time, so reconcile conflicting writes before releasing the fence.
+
+Re-enabling a schedule can start the most recently missed run immediately, so the new direction may begin replicating as soon as the switch deployment finishes. The script checks for running executions only before it deploys. Start a switch right after a scheduled run completes, and afterward confirm that only the new direction's job ran.
