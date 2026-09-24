@@ -1144,7 +1144,26 @@ az rest --method get \
 
 Run the query with each workspace GUID to inspect both regional jobs. Before the first Container Apps log is ingested, the custom table does not exist and the query returns a table-resolution error rather than replication history.
 
-Before production use, test the Action Group from its **Test action group** pane in the Azure portal. In a nonproduction deployment, also induce one controlled failed execution and pause the active schedule long enough to cross a shortened threshold. Confirm the Sev 1 and Sev 2 emails arrive, then restore a successful execution and verify both alert instances resolve. Do not test freshness by stopping production replication.
+Before production use, test the Action Group from its **Test action group** pane in the Azure portal. In a nonproduction deployment, also induce one controlled failed execution and pause the active schedule long enough to cross a shortened threshold. Confirm the Sev 1 and Sev 2 emails arrive, then restore a successful execution and verify both alert instances resolve. Do not test freshness by stopping production replication. The `fail-run`, `pause`, and `resume` commands of `scripts/demo.ps1` automate these tests; see [Demo walkthrough](#demo-walkthrough).
+
+## Demo walkthrough
+
+[docs/demo-runbook.md](docs/demo-runbook.md) is a step-by-step script for demonstrating a deployment. It covers the services inventory, the replication state in the Azure portal and the Azure CLI, a live replication, and the stale-replication and failed-run alerts. It uses `scripts/demo.ps1`, which works with both deployment profiles. Run it from a PowerShell session, such as Cloud Shell in PowerShell mode:
+
+```powershell
+./scripts/demo.ps1 status                 # Direction, recent executions, freshness, and open alerts
+./scripts/demo.ps1 inventory              # Deployed services and the existing resources that the jobs use
+./scripts/demo.ps1 seed                   # Write a demo file to the source share
+./scripts/demo.ps1 replicate              # Run replication now
+./scripts/demo.ps1 files                  # Compare the demo folder in both shares
+./scripts/demo.ps1 fail-run               # One failing execution, which raises the Sev 1 alert
+./scripts/demo.ps1 pause                  # Stop the schedule until the Sev 2 alert fires
+./scripts/demo.ps1 resume                 # Restore the schedule
+./scripts/demo.ps1 alerts                 # Alert rules, notification targets, and alert history
+./scripts/demo.ps1 cleanup                # Delete the demo folder from both shares
+```
+
+For the existing-resource profile, set `$env:REPLICATION_DEMO_RESOURCE_GROUP` or pass `-ResourceGroupName`. Commands that read or write the shares run as one-off job executions with a command override, so they use the job's managed identity and network path. The standby job is never started without an override.
 
 ## Switch direction
 
