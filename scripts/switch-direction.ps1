@@ -21,6 +21,18 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Get-RoleAssignmentHint([string]$ErrorText) {
+    # The switch redeploys the template, including the job identities' role assignments on the storage accounts and registry.
+    $flatText = [regex]::Replace($ErrorText, '\s*\r?\n[ \t]*(\|[ \t]?)?', ' ')
+    $scopes = @([regex]::Matches($flatText, "roleAssignments/write'\s+at\s+scope\s+'(?<scope>[^'\s]+?)/providers/Microsoft\.Authorization/roleAssignments/") |
+        ForEach-Object { $_.Groups['scope'].Value } | Sort-Object -Unique)
+    if ($scopes.Count -eq 0) {
+        return ''
+    }
+    $scopeList = ($scopes | ForEach-Object { "  $_" }) -join "`n"
+    return "`n`nThe signed-in identity isn't allowed to create role assignments at:`n$scopeList`nThe switch redeploys the job identities' AcrPull and Storage File Data Privileged Contributor assignments, and the jobs deploy only after them, so the replication direction didn't change. Grant Role Based Access Control Administrator, which can be limited to those two roles, or User Access Administrator or Owner, at these scopes or above, or activate the role if it's eligible through Privileged Identity Management. After a few minutes, rerun this script. See 'RBAC requirements' in the README."
+}
+
 function Invoke-AzCli {
     param([Parameter(Mandatory)][string[]]$Arguments)
 
@@ -38,7 +50,7 @@ function Invoke-AzCli {
     }
 
     if ($exitCode -ne 0) {
-        throw "az $($Arguments -join ' ') failed:`n$errorOutput`n$($output -join [Environment]::NewLine)"
+        throw "az $($Arguments -join ' ') failed:`n$errorOutput`n$($output -join [Environment]::NewLine)$(Get-RoleAssignmentHint $errorOutput)"
     }
     return ($output -join [Environment]::NewLine)
 }

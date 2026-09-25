@@ -11,7 +11,7 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-# Read-only inventory: every Azure CLI call below is a show, list, build, or what-if operation.
+# Read-only inventory: every Azure CLI call below is a show, list, REST GET, build, or what-if operation.
 
 function Invoke-Az {
     param([Parameter(Mandatory)][string[]]$Arguments)
@@ -80,6 +80,46 @@ function Add-LookupFailure {
     } else {
         Add-Prerequisite -Area $Area -Item $Item -Status 'Not verified' -Detail $Result.Error
     }
+}
+
+$roleAssignmentTargets = [System.Collections.Generic.List[object]]::new()
+
+# Records a scope where the deployment assigns a role to the job identities. For a resource that doesn't exist yet, the
+# right to assign roles comes from its resource group, or from the subscription when the deployment creates the group.
+function Add-RoleAssignmentTarget {
+    param([Parameter(Mandatory)][string]$Role, [string]$ResourceId, [string]$Label, [string]$ResourceGroup, [string]$GroupState)
+
+    if ($ResourceId) {
+        $target = @{ Scope = $ResourceId; Item = $Label; NewGroup = '' }
+    } elseif ($GroupState -eq 'Missing') {
+        $target = @{ Scope = "/subscriptions/$subscriptionId"; Item = "subscription $($account.Value.name)"; NewGroup = $ResourceGroup }
+    } else {
+        $target = @{ Scope = "/subscriptions/$subscriptionId/resourceGroups/$ResourceGroup"; Item = "resource group $ResourceGroup"; NewGroup = '' }
+    }
+    $roleAssignmentTargets.Add([pscustomobject]($target + @{ Role = $Role }))
+}
+
+# Evaluates the signed-in identity's role assignments at the scope. Deny assignments, role assignment conditions, and
+# roles that are only eligible through Privileged Identity Management aren't reflected.
+function Test-RoleAssignmentRight([string]$Scope) {
+    $action = 'Microsoft.Authorization/roleAssignments/write'
+    $arguments = @('rest', '--method', 'get', '--url', "$Scope/providers/Microsoft.Authorization/permissions", '--url-parameters', 'api-version=2022-04-01')
+    for ($page = 0; $page -lt 10 -and $arguments; $page++) {
+        $result = Invoke-Az -Arguments $arguments
+        if (-not $result.Succeeded) {
+            return [pscustomobject]@{ Allowed = $null; Error = $result.Error }
+        }
+        foreach ($entry in @(Get-Property $result.Value 'value')) {
+            $granted = @(Get-Property $entry 'actions' | Where-Object { $action -like $_ })
+            $excluded = @(Get-Property $entry 'notActions' | Where-Object { $action -like $_ })
+            if ($granted.Count -gt 0 -and $excluded.Count -eq 0) {
+                return [pscustomobject]@{ Allowed = $true; Error = $null }
+            }
+        }
+        $nextLink = [string](Get-Property $result.Value 'nextLink')
+        $arguments = if ($nextLink) { @('rest', '--method', 'get', '--url', $nextLink) } else { $null }
+    }
+    return [pscustomobject]@{ Allowed = $false; Error = $null }
 }
 
 function Get-ResourceDescriptor([string]$ResourceId) {
@@ -393,6 +433,7 @@ if ($isExistingProfile -and -not $hasPlaceholders) {
         @{ Name = $workloadGroup; Used = $true; Purpose = 'primary-region compute and monitoring' }
     )
     $existingGroups = @(Get-ParameterValue 'existingResourceGroups' | Where-Object { $_ } | ForEach-Object { ConvertTo-Key $_ })
+    $groupStates = @{}
     $targetGroups = [ordered]@{}
     foreach ($entry in $groupPlan | Where-Object { $_.Used -and $_.Name }) {
         $key = ConvertTo-Key $entry.Name
@@ -406,6 +447,7 @@ if ($isExistingProfile -and -not $hasPlaceholders) {
         $purposes = ($target.Purposes | Select-Object -Unique) -join ', '
         $listed = $existingGroups -contains (ConvertTo-Key $target.Name)
         $group = Invoke-Az -Arguments @('group', 'show', '--name', $target.Name)
+        $groupStates[(ConvertTo-Key $target.Name)] = if ($group.Succeeded) { 'Exists' } elseif ($group.NotFound) { 'Missing' } else { 'Unknown' }
         if ($group.Succeeded) {
             if ($listed) {
                 Add-Prerequisite -Area 'Resource group' -Item $item -Status 'Ready' -Detail "Exists and is listed in existingResourceGroups, so the deployment adds the $purposes without modifying it."
@@ -766,6 +808,31 @@ if ($isExistingProfile -and -not $hasPlaceholders) {
         }
     }
 
+    # Both job identities get the storage role on both accounts and AcrPull on the registry.
+    $storageRoleName = 'Storage File Data Privileged Contributor'
+    foreach ($role in 'primary', 'secondary') {
+        $side = $sides[$role]
+        if ($side.StorageMode -eq 'new') {
+            $group = $placement[$role].Storage
+            Add-RoleAssignmentTarget -Role $storageRoleName -ResourceGroup $group -GroupState $groupStates[(ConvertTo-Key $group)]
+        } elseif ($side.Account) {
+            $accountId = [string](Get-Property $side.Account 'id')
+            if (-not $accountId) {
+                $accountId = "/subscriptions/$subscriptionId/resourceGroups/$(Get-ParameterValue "${role}StorageResourceGroupName")/providers/Microsoft.Storage/storageAccounts/$($side.AccountName)"
+            }
+            Add-RoleAssignmentTarget -Role $storageRoleName -ResourceId $accountId -Label "$role storage account $($side.AccountName)"
+        }
+    }
+    if ($registryMode -eq 'new') {
+        Add-RoleAssignmentTarget -Role 'AcrPull' -ResourceGroup $registryPlacement -GroupState $groupStates[(ConvertTo-Key $registryPlacement)]
+    } elseif ($registry) {
+        $registryId = [string](Get-Property $registry 'id')
+        if (-not $registryId) {
+            $registryId = "/subscriptions/$subscriptionId/resourceGroups/$(Get-ParameterValue 'registryResourceGroupName')/providers/Microsoft.ContainerRegistry/registries/$registryName"
+        }
+        Add-RoleAssignmentTarget -Role 'AcrPull' -ResourceId $registryId -Label "registry $registryName"
+    }
+
     $zones = Invoke-Az -Arguments @('network', 'private-dns', 'zone', 'list')
     $fileZones = @($zones.Value | Where-Object { (Get-Property $_ 'name') -eq $fileZoneName })
     $registryEndpoints = if ($registry) { @(Get-ApprovedEndpoints $registry 'registry') } else { @() }
@@ -881,6 +948,45 @@ if ($isExistingProfile -and -not $hasPlaceholders) {
         if (-not (Get-EndpointDetails $endpointId)) {
             Add-Prerequisite -Area 'Network' -Item "Listed endpoint $(Split-Path $endpointId -Leaf)" -Status 'Warning' -Detail 'Listed in existingPrivateEndpointIds but not found.'
         }
+    }
+}
+
+if (-not $isExistingProfile -and -not $hasPlaceholders) {
+    # The greenfield deployment creates the storage accounts and the registry in the workload resource group.
+    $greenfieldGroup = [string](Get-ParameterValue 'resourceGroupName')
+    $group = Invoke-Az -Arguments @('group', 'show', '--name', $greenfieldGroup)
+    $groupState = if ($group.Succeeded) { 'Exists' } elseif ($group.NotFound) { 'Missing' } else { 'Unknown' }
+    Add-RoleAssignmentTarget -Role 'Storage File Data Privileged Contributor' -ResourceGroup $greenfieldGroup -GroupState $groupState
+    Add-RoleAssignmentTarget -Role 'AcrPull' -ResourceGroup $greenfieldGroup -GroupState $groupState
+}
+
+# What-if and validation can't check these rights: the nested deployments that create the role assignments depend on
+# the job identities' principal IDs, so Azure skips them (NestedDeploymentShortCircuited) until the deployment runs.
+$assignmentScopes = [ordered]@{}
+foreach ($target in $roleAssignmentTargets) {
+    $key = ConvertTo-Key $target.Scope
+    if (-not $assignmentScopes.Contains($key)) {
+        $assignmentScopes[$key] = [pscustomobject]@{ Scope = $target.Scope; Item = $target.Item; Roles = [System.Collections.Generic.List[string]]::new(); NewGroups = [System.Collections.Generic.List[string]]::new() }
+    }
+    $entry = $assignmentScopes[$key]
+    if (-not $entry.Roles.Contains($target.Role)) {
+        $entry.Roles.Add($target.Role)
+    }
+    if ($target.NewGroup -and -not $entry.NewGroups.Contains($target.NewGroup)) {
+        $entry.NewGroups.Add($target.NewGroup)
+    }
+}
+foreach ($entry in $assignmentScopes.Values) {
+    $item = "Role assignments on $($entry.Item)"
+    $roles = $entry.Roles -join ' and '
+    $note = if ($entry.NewGroups.Count -gt 0) { " The deployment creates resource group $($entry.NewGroups -join ', '), so the right must come from the subscription or above." } else { '' }
+    $right = Test-RoleAssignmentRight $entry.Scope
+    if ($null -eq $right.Allowed) {
+        Add-Prerequisite -Area 'Permissions' -Item $item -Status 'Not verified' -Detail "Could not read the signed-in identity's permissions. $($right.Error)"
+    } elseif ($right.Allowed) {
+        Add-Prerequisite -Area 'Permissions' -Item $item -Status 'Ready' -Detail "The signed-in identity can assign $roles to the job identities.$note"
+    } else {
+        Add-Prerequisite -Area 'Permissions' -Item $item -Status 'Action required' -Detail "The signed-in identity can't create role assignments here, so the deployment fails when it assigns $roles to the job identities. Grant Role Based Access Control Administrator, which can be limited to these roles, or User Access Administrator or Owner, at this scope or above. Activate the role first if it's eligible through Privileged Identity Management.$note"
     }
 }
 

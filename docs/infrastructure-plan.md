@@ -59,6 +59,7 @@ The deployment principal performs subscription-scope deployments and creates rol
 | --- | --- | --- |
 | Simple | Owner at the deployment subscription | Covers resource-group creation, resource deployment, and role assignment creation |
 | Separated | Contributor plus Role Based Access Control Administrator at the deployment subscription | Separates resource management from access management; equivalent custom roles are also valid |
+| Constrained | Contributor on the replication resource groups, plus Role Based Access Control Administrator with a condition that allows only AcrPull and Storage File Data Privileged Contributor for service principals, on each storage account and the registry | Limits delegated access management to the six assignments the deployment creates; the README shows the [condition](../README.md#rbac-requirements) |
 
 At minimum, an equivalent custom deployment role must allow:
 
@@ -79,6 +80,8 @@ When the existing-resource profile creates services, it places each one in its o
 
 The README's [troubleshooting section](../README.md#deployment-errors) maps the resulting authorization errors to the missing rights.
 
+Validation and what-if can't confirm the role assignment rights. The nested deployments that create the assignments depend on the job identities' principal IDs, which exist only once the deployment runs, so Azure reports them as `NestedDeploymentShortCircuited` and checks their permissions only when it starts them. A missing right therefore fails the deployment after the identities are created, before any job exists. `scripts/inventory.ps1` checks these rights beforehand, and `scripts/deploy.ps1` and `scripts/switch-direction.ps1` list the refused scopes when a deployment fails on them.
+
 ### Deployment script and ACR
 
 `scripts/deploy.ps1` can either consume a prebuilt digest-pinned image or run an ACR Task build and inspect its manifest:
@@ -88,7 +91,7 @@ The README's [troubleshooting section](../README.md#deployment-errors) maps the 
 
 ### Operational access
 
-- `scripts/switch-direction.ps1` performs another subscription deployment. The failover operator therefore needs the same deployment and role-assignment permissions described above.
+- `scripts/switch-direction.ps1` performs another subscription deployment. The failover operator therefore needs the same deployment and role-assignment permissions described above, including role assignment rights on both storage accounts and the registry. Confirm them, and activate any eligible Privileged Identity Management role in a test, before an outage. A switch that fails on these rights leaves the replication direction unchanged, because the jobs deploy only after their role assignments.
 - Starting a job requires `Microsoft.App/jobs/start/action`, which is privileged: a start request can override the image, command, and environment variables, and the execution runs as the job's managed identity with data access to both shares. Grant start and stop rights only to replication operators. Starting the standby job without an override performs a real reverse synchronization; use a `DRY_RUN=true` execution override for readiness tests.
 - Users investigating failures need read access to the Container Apps Jobs, alert resources, and Log Analytics workspaces. Querying workspace data also requires a Log Analytics data-query role, such as Log Analytics Reader, at the workspace or a parent scope.
 

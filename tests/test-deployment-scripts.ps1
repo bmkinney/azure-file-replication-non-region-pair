@@ -78,12 +78,14 @@ $commonRules = @(
 
 try {
     # deploy.ps1 -WhatIf previews without deploying, cleans up, and finds the template from the using declaration.
+    $whatIfDiagnostics = "Resource changes: 1 to create.`nDiagnostics (1):`n/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-storage/providers/Microsoft.Resources/deployments/replication-primary-storage-rbac (NestedDeploymentShortCircuited) A nested deployment got short-circuited and all its resources got skipped from validation."
     $fakeAzRules = $commonRules + @(
         (New-Rule 'deployment sub validate*' '{}')
-        (New-Rule 'deployment sub what-if*' 'Resource changes: 1 to create.')
+        (New-Rule 'deployment sub what-if*' $whatIfDiagnostics)
     )
     $output = Invoke-WithIsolatedTemp { & $deployScript -ParametersFile $parametersFile -WhatIf 6>&1 | Out-String }
     Assert-True ($output.Contains('Resource changes: 1 to create.')) 'deploy.ps1 -WhatIf did not print the what-if result'
+    Assert-True ($output.Contains('diagnostics are expected') -and $output.Contains('scripts/inventory.ps1 checks those permissions')) "deploy.ps1 did not explain the short-circuited nested deployments: $output"
     Assert-True (@($azCalls | Where-Object { $_ -like 'bicep build --file *main.bicep --stdout*' }).Count -eq 1) "deploy.ps1 did not resolve the template from the using declaration: $($azCalls -join '; ')"
     Assert-True (@($azCalls | Where-Object { $_ -like 'deployment sub create*' -or $_ -like 'acr *' }).Count -eq 0) 'deploy.ps1 -WhatIf changed Azure resources'
     Assert-True ((Get-LeakedTempFiles).Count -eq 0) "deploy.ps1 -WhatIf left temporary files: $((Get-LeakedTempFiles).Name -join ', ')"
@@ -100,6 +102,7 @@ try {
     }
     Assert-True ($null -ne $failure) 'deploy.ps1 -WhatIf did not fail when validation failed'
     Assert-True ($failure.Contains('validation detail for the test')) "deploy.ps1 -WhatIf dropped the Azure CLI error output: $failure"
+    Assert-True (-not $failure.Contains('create role assignments')) 'deploy.ps1 added the role assignment hint to an unrelated failure'
     Assert-True ((Get-LeakedTempFiles).Count -eq 0) 'deploy.ps1 -WhatIf left temporary files after a failure'
 
     # switch-direction.ps1 -WhatIf checks the jobs without deploying and cleans up.
@@ -174,6 +177,48 @@ try {
     }
     Assert-True ($failure -like '*found 1.*-SecondaryResourceGroupName*') "a missing secondary resource group was not explained: $failure"
     Assert-True (@($azCalls | Where-Object { $_ -like 'deployment sub create*' }).Count -eq 0) 'switch-direction.ps1 deployed with only one job'
+
+    # A deployment that can't create the job identities' role assignments names each refused scope once.
+    $storageScope = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-storage/providers/Microsoft.Storage/storageAccounts/stprimary'
+    $registryScope = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-registry/providers/Microsoft.ContainerRegistry/registries/acrshared'
+    $refusals = foreach ($assignment in @(@($storageScope, '1'), @($storageScope, '2'), @($registryScope, '3'))) {
+        "Authorization failed for template resource '$($assignment[1])' of type 'Microsoft.Authorization/roleAssignments'. The client 'deployer@example.com' with object id '00000000-0000-0000-0000-00000000000$($assignment[1])' does not have permission to perform action 'Microsoft.Authorization/roleAssignments/write' at scope '$($assignment[0])/providers/Microsoft.Authorization/roleAssignments/0000000$($assignment[1])-0000-0000-0000-000000000000'."
+    }
+    $refused = "ERROR: {`"status`":`"Failed`",`"error`":{`"code`":`"DeploymentFailed`",`"details`":[{`"code`":`"InvalidTemplateDeployment`",`"message`":`"Deployment failed with multiple errors: '$($refusals -join ':')'`"}]}}"
+    function Get-HintScopes([string]$Message) {
+        $hint = $Message.Substring($Message.IndexOf("isn't allowed to create role assignments at:"))
+        return @([regex]::Matches($hint, '(?m)^  (/subscriptions/\S+)$') | ForEach-Object { $_.Groups[1].Value })
+    }
+
+    $fakeAzRules = $commonRules + @(
+        (New-Rule 'deployment sub validate*' '{}')
+        (New-Rule 'deployment sub create*' $refused 1)
+    )
+    $failure = $null
+    try {
+        Invoke-WithIsolatedTemp { & $deployScript -ParametersFile $parametersFile -SkipWhatIf -Confirm:$false 6> $null 2> $null }
+    } catch {
+        $failure = $_.Exception.Message
+    }
+    Assert-True ($null -ne $failure -and $failure.Contains("isn't allowed to create role assignments at:")) "deploy.ps1 did not explain the refused role assignments: $failure"
+    $hintScopes = Get-HintScopes $failure
+    Assert-True ($hintScopes.Count -eq 2 -and $hintScopes -contains $storageScope -and $hintScopes -contains $registryScope) "deploy.ps1 did not list each refused scope once: $($hintScopes -join '; ')"
+    Assert-True ($failure.Contains('reuses the resources it already created')) 'deploy.ps1 did not say that a rerun is safe'
+    Assert-True (@($azCalls | Where-Object { $_ -like 'deployment sub create*' }).Count -eq 1 -and @($azCalls | Where-Object { $_ -like 'acr *' }).Count -eq 0) 'deploy.ps1 continued after the bootstrap deployment failed'
+
+    $fakeAzRules = @(
+        (New-Rule 'containerapp job list*' (ConvertTo-Json -InputObject $jobs -Depth 5 -Compress))
+        (New-Rule 'containerapp job execution list*' '0')
+        (New-Rule 'deployment sub create*' $refused 1)
+    )
+    $failure = $null
+    try {
+        Invoke-WithIsolatedTemp { & $switchScript -ActiveRegion secondary -WritesFenced -ParametersFile $parametersFile -Confirm:$false 6> $null 2> $null }
+    } catch {
+        $failure = $_.Exception.Message
+    }
+    Assert-True ($null -ne $failure -and $failure.Contains("the replication direction didn't change")) "switch-direction.ps1 did not explain the refused role assignments: $failure"
+    Assert-True ((Get-HintScopes $failure).Count -eq 2) "switch-direction.ps1 did not list each refused scope once: $((Get-HintScopes $failure) -join '; ')"
 } finally {
     Remove-Item -LiteralPath $workRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
