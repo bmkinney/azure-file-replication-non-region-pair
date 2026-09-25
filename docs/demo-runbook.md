@@ -9,7 +9,7 @@ This runbook walks through a live demonstration of the Azure Files replication s
 
 Each step uses `scripts/demo.ps1`. It runs in Azure Cloud Shell (PowerShell) or in any PowerShell 7 session with the Azure CLI, and it works with both deployment profiles.
 
-Run the demo against a demonstration or nonproduction deployment. The stale-replication scenario stops scheduled replication for about an hour, so the replica falls behind the source during that time.
+Run the demo against a nonproduction deployment. The stale-replication scenario stops scheduled replication for about an hour, so the replica falls behind the source during that time.
 
 ## At a glance
 
@@ -50,7 +50,7 @@ Run the demo against a demonstration or nonproduction deployment. The stale-repl
 - A deployment of either profile that runs the AzCopy image, not the placeholder image, and has an active direction (`activeRegion=primary` or `secondary`). `status` shows both.
 - Azure Cloud Shell in PowerShell mode, or PowerShell 7 and the Azure CLI on a workstation, with this repository cloned. Run the commands from the repository root.
 - The subscription that contains the deployment, selected with `az account set --subscription <subscription-id>`.
-- For the existing-resource profile, the replication resource group in an environment variable, so you don't have to pass `-ResourceGroupName` to every command:
+- For the existing-resource profile, or a greenfield deployment with a custom `resourceGroupName`, the replication resource group in an environment variable, so you don't have to pass `-ResourceGroupName` to every command:
 
   ```powershell
   $env:REPLICATION_DEMO_RESOURCE_GROUP = '<replication-resource-group>'
@@ -76,14 +76,14 @@ Treat the start permission as privileged: an execution with a command override c
 3. Test email delivery. In the portal, open the replication action group (`ag-replication-*`) and select **Test action group**.
 4. Rehearse segments 4 and 5, then run `./scripts/demo.ps1 cleanup`. The failed-run alert resolves about 10 minutes after the rehearsal.
 
-A shorter threshold makes staging easier. In a demonstration deployment, you can redeploy with a 20-minute threshold. Pass the values that the deployment scripts set as overrides, so that only the threshold changes:
+A shorter threshold makes staging easier. In a nonproduction deployment, you can redeploy with a 20-minute threshold. Pass the values that the deployment scripts set as overrides, so that only the threshold changes:
 
 ```powershell
 $image = az containerapp job show --name <active-job> --resource-group <replication-resource-group> --query "properties.template.containers[0].image" --output tsv
 az deployment sub create --location <deployment-location> --parameters <parameter-file> --parameters activeRegion=<active-region> "containerImage=$image" replicationLagThresholdMinutes=20
 ```
 
-For the greenfield profile, also add `acrPublicNetworkAccess=Disabled`. To confirm that nothing else would change, run `./scripts/demo.ps1 inventory -ParametersFile <parameter-file>` first.
+For a greenfield deployment, also add `acrPublicNetworkAccess=Disabled`. To confirm that nothing else would change, run `./scripts/demo.ps1 inventory -ParametersFile <parameter-file>` first.
 
 ## Before the session: stage the stale-replication alert
 
@@ -119,8 +119,8 @@ Before you start:
 ./scripts/demo.ps1 inventory
 ```
 
-- The first table lists every resource that this solution deployed, found by its `Workload` tag: the Container Apps jobs and environments, managed identities, Log Analytics workspaces, alert rules, and the action group. The greenfield profile also lists its storage, networking, registry, and DNS resources.
-- The second table lists existing resources that the jobs use but this solution doesn't manage: the storage accounts and shares, the VNets and subnets, and the registry. It is empty for the greenfield profile.
+- The first table lists every resource that this solution deployed, found by its `Workload` tag: the Container Apps jobs and environments, managed identities, Log Analytics workspaces, alert rules, and the action group. It also includes the storage, networking, registry, and DNS resources that the deployment created: all of them for a greenfield deployment, and the services set to `new` for the existing-resource profile.
+- The second table lists existing resources that the jobs use but this solution doesn't manage: the storage accounts and shares, the VNets and subnets, and the registry. It is empty for a greenfield deployment.
 - Optionally, add `-ParametersFile <parameter-file>` for the prerequisite checks and a what-if drift report. `Exists` on every template resource means the environment matches the templates. The command passes the deployed direction, image, and registry network access as parameter overrides, so that they aren't reported as changes. What-if takes a few minutes, so you can run it before the session.
 
 In the portal:
@@ -299,7 +299,7 @@ These parameters apply to every command:
 
 ## Safety notes
 
-- Pausing stops replication, so the replica falls behind until you resume. Use a demonstration deployment or a maintenance window.
+- Pausing stops replication, so the replica falls behind until you resume. Use a nonproduction deployment or a maintenance window.
 - The script never starts the standby job without a command override. Don't select **Run now** on the standby job in the portal, because that runs a real reverse replication.
 - `fail-run` changes only the source URL of one execution and forces `DELETE_DESTINATION=false`, so the replica isn't touched.
 - Helper executions don't print the success marker, so they can't hide stale replication.
