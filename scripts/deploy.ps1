@@ -14,6 +14,19 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Get-RoleAssignmentHint([string]$ErrorText) {
+    # Azure checks the right to create role assignments only when it starts the nested deployments that create them,
+    # after validation and what-if pass, because they depend on the job identities' principal IDs.
+    $flatText = [regex]::Replace($ErrorText, '\s*\r?\n[ \t]*(\|[ \t]?)?', ' ')
+    $scopes = @([regex]::Matches($flatText, "roleAssignments/write'\s+at\s+scope\s+'(?<scope>[^'\s]+?)/providers/Microsoft\.Authorization/roleAssignments/") |
+        ForEach-Object { $_.Groups['scope'].Value } | Sort-Object -Unique)
+    if ($scopes.Count -eq 0) {
+        return ''
+    }
+    $scopeList = ($scopes | ForEach-Object { "  $_" }) -join "`n"
+    return "`n`nThe signed-in identity isn't allowed to create role assignments at:`n$scopeList`nThe deployment assigns AcrPull on the registry and Storage File Data Privileged Contributor on the file storage accounts to the replication job identities. Grant Role Based Access Control Administrator, which can be limited to those two roles, or User Access Administrator or Owner, at these scopes or above. Activate the role first if it's eligible through Privileged Identity Management. After a few minutes, rerun this script; the deployment reuses the resources it already created. See 'RBAC requirements' in the README."
+}
+
 function Invoke-AzCli {
     param([Parameter(Mandatory)][string[]]$Arguments)
 
@@ -31,7 +44,7 @@ function Invoke-AzCli {
     }
 
     if ($exitCode -ne 0) {
-        throw "az $($Arguments -join ' ') failed:`n$errorOutput`n$($output -join [Environment]::NewLine)"
+        throw "az $($Arguments -join ' ') failed:`n$errorOutput`n$($output -join [Environment]::NewLine)$(Get-RoleAssignmentHint $errorOutput)"
     }
     return ($output -join [Environment]::NewLine)
 }
@@ -62,12 +75,16 @@ $null = Invoke-AzCli -Arguments @(
 )
 
 if (-not $SkipWhatIf) {
-    Invoke-AzCli -Arguments @(
+    $whatIfOutput = Invoke-AzCli -Arguments @(
         'deployment', 'sub', 'what-if',
         '--location', $Location,
         '--parameters', $ParametersFile,
         '--result-format', 'FullResourcePayloads'
-    ) | Write-Host
+    )
+    $whatIfOutput | Write-Host
+    if ($whatIfOutput -match 'NestedDeploymentShortCircuited') {
+        Write-Host 'The NestedDeploymentShortCircuited diagnostics are expected: nested deployments that use values created during the deployment, such as the job identities'' IDs, are evaluated only when the deployment runs, so what-if skips their resources and their role-assignment permission checks. scripts/inventory.ps1 checks those permissions.'
+    }
 }
 
 if ($ContainerImage -and $ContainerImage -notmatch '@sha256:[a-fA-F0-9]{64}$') {

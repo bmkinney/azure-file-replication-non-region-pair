@@ -18,6 +18,11 @@ function az {
     }
     foreach ($rule in $fakeAzRules) {
         if ($joined -like $rule.Pattern) {
+            if ($rule.ExitCode -ne 0) {
+                $global:LASTEXITCODE = $rule.ExitCode
+                Write-Error $rule.Response -ErrorAction Continue
+                return
+            }
             $global:LASTEXITCODE = 0
             return (ConvertTo-Json -InputObject $rule.Response -Depth 20 -Compress)
         }
@@ -26,8 +31,8 @@ function az {
     Write-Error "ERROR: (ResourceNotFound) No test fixture for: $joined" -ErrorAction Continue
 }
 
-function New-Rule([string]$Pattern, $Response) {
-    [pscustomobject]@{ Pattern = $Pattern; Response = $Response }
+function New-Rule([string]$Pattern, $Response, [int]$ExitCode = 0) {
+    [pscustomobject]@{ Pattern = $Pattern; Response = $Response; ExitCode = $ExitCode }
 }
 
 function Invoke-Inventory([string]$ParametersFile, [string[]]$ParameterOverrides = @()) {
@@ -55,17 +60,27 @@ function Get-Status($Report, [string]$ItemPattern) {
     return @($Report.Prerequisites | Where-Object { $_.Item -like $ItemPattern } | ForEach-Object { $_.Status })
 }
 
+function Get-PermissionRows($Report) {
+    return @($Report.Prerequisites | Where-Object Area -eq 'Permissions')
+}
+
+# Permissions API responses: one entry per role assignment that applies to the caller at the scope.
+$ownerPermissions = @{ value = @(@{ actions = @('*'); notActions = @() }) }
+$contributorPermissions = @{ actions = @('*'); notActions = @('Microsoft.Authorization/*/Delete', 'Microsoft.Authorization/*/Write', 'Microsoft.Authorization/elevateAccess/Action') }
+$rbacAdministratorPermissions = @{ actions = @('Microsoft.Authorization/roleAssignments/write', 'Microsoft.Authorization/roleAssignments/delete', '*/read'); notActions = @() }
+
 $commonRules = @(
     (New-Rule 'account show*' @{ id = '00000000-0000-0000-0000-000000000000'; name = 'Test subscription'; tenantId = '11111111-1111-1111-1111-111111111111' }),
     (New-Rule 'cloud show*' @{ suffixes = @{ storageEndpoint = 'core.windows.net' } }),
     (New-Rule 'provider show --namespace*' @{
         registrationState = 'Registered'
         resourceTypes     = @(@{ resourceType = 'managedEnvironments'; locations = @('South Central US', 'West US', 'West US 2', 'North Central US') })
-    })
+    }),
+    (New-Rule 'rest --method get --url */providers/Microsoft.Authorization/permissions *' $ownerPermissions)
 )
 
 # Greenfield: every resource is new.
-$fakeAzRules = $commonRules + @(
+$greenfieldRules = @(
     (New-Rule 'rest --method get --url *Microsoft.Storage/skus*' @{ value = @(
         @{ name = 'Standard_ZRS'; kind = 'StorageV2'; locations = @('southcentralus'); restrictions = @() },
         @{ name = 'Standard_LRS'; kind = 'StorageV2'; locations = @('westus'); restrictions = @() }
@@ -76,6 +91,7 @@ $fakeAzRules = $commonRules + @(
         @{ changeType = 'Create'; resourceId = "$subscription/resourceGroups/rg-azure-files-replication-demo/providers/Microsoft.Storage/storageAccounts/stfileprimary/providers/Microsoft.Authorization/roleAssignments/role-1" }
     ) })
 )
+$fakeAzRules = $commonRules + $greenfieldRules
 $report = Invoke-Inventory (Join-Path $repositoryRoot 'infra/main.bicepparam')
 Assert-True ($report.Profile -like 'greenfield*') 'main.bicepparam must be detected as the greenfield profile'
 Assert-True ($report.Summary.ResourcesToProvision -eq 3) "greenfield resources to provision were $($report.Summary.ResourcesToProvision)"
@@ -84,6 +100,27 @@ Assert-True ((Get-Status $report 'alertEmailAddresses') -contains 'Warning') 'th
 $roleAssignment = @($report.Resources | Where-Object Type -eq 'Microsoft.Authorization/roleAssignments')
 Assert-True ($roleAssignment.Count -eq 1 -and $roleAssignment[0].Name -eq 'role-1 on stfileprimary') 'role assignment scope was not described'
 Assert-True ((Get-WhatIfCall) -notlike '*--parameters activeRegion*') 'what-if must not add parameters when no overrides are given'
+
+# The workload resource group doesn't exist yet, so the right to assign roles must come from the subscription.
+$permissionRows = Get-PermissionRows $report
+Assert-True ($permissionRows.Count -eq 1 -and $permissionRows[0].Status -eq 'Ready' -and $permissionRows[0].Item -eq 'Role assignments on subscription Test subscription') "greenfield role assignment rights were not checked at the subscription: $($permissionRows | ConvertTo-Json -Compress)"
+Assert-True ($permissionRows[0].Detail -like '*Storage File Data Privileged Contributor and AcrPull*' -and $permissionRows[0].Detail -like '*creates resource group rg-azure-files-replication-demo*') "greenfield permission detail: $($permissionRows[0].Detail)"
+Assert-True (@($global:InventoryAzCalls | Where-Object { $_ -like "rest --method get --url $subscription/providers/Microsoft.Authorization/permissions --url-parameters api-version=2022-04-01*" }).Count -eq 1) 'the permissions API was not called once at the subscription'
+
+# Contributor can deploy resources but not assign roles: its notActions exclude Microsoft.Authorization/*/Write.
+$fakeAzRules = @((New-Rule 'rest --method get --url */providers/Microsoft.Authorization/permissions *' @{ value = @($contributorPermissions) })) + $commonRules + $greenfieldRules + @(
+    (New-Rule 'group show --name rg-azure-files-replication-demo *' @{ name = 'rg-azure-files-replication-demo' })
+)
+$report = Invoke-Inventory (Join-Path $repositoryRoot 'infra/main.bicepparam')
+$permissionRows = Get-PermissionRows $report
+Assert-True ($permissionRows.Count -eq 1 -and $permissionRows[0].Status -eq 'Action required' -and $permissionRows[0].Item -eq 'Role assignments on resource group rg-azure-files-replication-demo') "Contributor-only access was not flagged at the existing workload group: $($permissionRows | ConvertTo-Json -Compress)"
+Assert-True ($permissionRows[0].Detail -like '*Privileged Identity Management*') 'the permission finding does not mention eligible roles'
+
+# A failed permissions lookup is reported as not verified.
+$fakeAzRules = @((New-Rule 'rest --method get --url */providers/Microsoft.Authorization/permissions *' 'ERROR: (AuthorizationFailed) The client does not have authorization.' 1)) + $commonRules + $greenfieldRules
+$report = Invoke-Inventory (Join-Path $repositoryRoot 'infra/main.bicepparam')
+Assert-True ((Get-PermissionRows $report | ForEach-Object Status) -contains 'Not verified') 'a failed permissions lookup was not reported as not verified'
+$fakeAzRules = $commonRules + $greenfieldRules
 
 # Overrides reach what-if as extra --parameters values; names the template doesn't declare are dropped.
 $report = Invoke-Inventory (Join-Path $repositoryRoot 'infra/main.bicepparam') @('activeRegion=primary', 'acrPublicNetworkAccess=Disabled', 'notDeclared=1')
@@ -194,6 +231,21 @@ try {
     Assert-True ((Get-Status $report 'containerImage') -contains 'Ready') 'the digest-pinned image was not accepted'
     Assert-True ($report.Summary.PrerequisitesActionRequired -eq 0) "unexpected action items: $(@($report.Prerequisites | Where-Object Status -eq 'Action required' | ForEach-Object Item) -join '; ')"
     Assert-True ($report.Summary.ResourcesToProvision -eq 1 -and $report.Summary.ResourcesExisting -eq 1) 'what-if results were not classified'
+    $permissionItems = @(Get-PermissionRows $report | Where-Object Status -eq 'Ready' | ForEach-Object Item)
+    Assert-True ($permissionItems.Count -eq 3 -and $permissionItems -contains 'Role assignments on primary storage account stprimarytest' -and $permissionItems -contains 'Role assignments on secondary storage account stsecondarytest' -and $permissionItems -contains 'Role assignments on registry acrtest') "role assignment rights were not checked on each reused resource: $($permissionItems -join '; ')"
+    Assert-True (@($global:InventoryAzCalls | Where-Object { $_ -like "rest --method get --url $subscription/resourceGroups/rg-storage-primary/providers/Microsoft.Storage/storageAccounts/stprimarytest/providers/Microsoft.Authorization/permissions *" }).Count -eq 1) 'the storage account permissions were not read at the account scope'
+
+    # Role Based Access Control Administrator on the accounts grants the right even with Contributor's exclusions; the registry has only Contributor.
+    $mixedRules = @(
+        (New-Rule 'rest --method get --url */storageAccounts/*/providers/Microsoft.Authorization/permissions *' @{ value = @($contributorPermissions, $rbacAdministratorPermissions) }),
+        (New-Rule 'rest --method get --url */registries/acrtest/providers/Microsoft.Authorization/permissions *' @{ value = @($contributorPermissions) })
+    )
+    $fakeAzRules = $mixedRules + $commonRules + (Get-ExistingRules -PrimaryEndpoints @('pe-primary-file-a', 'pe-primary-file-b') -SecondaryEndpoints @('pe-secondary-file-a', 'pe-secondary-file-b'))
+    $report = Invoke-Inventory $parametersFile
+    Assert-True ((Get-Status $report 'Role assignments on primary storage account stprimarytest') -contains 'Ready') 'a constrained administrator assignment on the account was not accepted'
+    $registryRow = @(Get-PermissionRows $report | Where-Object Item -eq 'Role assignments on registry acrtest')
+    Assert-True ($registryRow.Count -eq 1 -and $registryRow[0].Status -eq 'Action required' -and $registryRow[0].Detail -like '*assigns AcrPull*') "missing registry role assignment rights were not flagged: $($registryRow | ConvertTo-Json -Compress)"
+    Assert-True ($report.Summary.PrerequisitesActionRequired -eq 1) "unexpected action items with missing registry rights: $(@($report.Prerequisites | Where-Object Status -eq 'Action required' | ForEach-Object Item) -join '; ')"
 
     $fakeAzRules = $commonRules + (Get-ExistingRules -PrimaryEndpoints @('pe-primary-file-a') -SecondaryEndpoints @('pe-secondary-file-b'))
     $report = Invoke-Inventory $parametersFile
@@ -268,6 +320,9 @@ param alertEmailAddresses = ['alerts@replication.test']
     Assert-True ((Get-Status $report 'secondary job copy path*') -contains 'Ready') 'endpoints created in a new VNet were not accepted'
     Assert-True ((Get-Status $report '*job registry path') -notcontains 'Action required') 'endpoints created for a new registry were not accepted'
     Assert-True ($report.Summary.PrerequisitesActionRequired -eq 0) "unexpected hybrid action items: $(@($report.Prerequisites | Where-Object Status -eq 'Action required' | ForEach-Object Item) -join '; ')"
+    $subscriptionRow = @(Get-PermissionRows $report | Where-Object Item -eq 'Role assignments on subscription Test subscription')
+    Assert-True ($subscriptionRow.Count -eq 1 -and $subscriptionRow[0].Detail -like '*Storage File Data Privileged Contributor and AcrPull*') "the new account and registry in a group the deployment creates were not checked together at the subscription: $($subscriptionRow | ConvertTo-Json -Compress)"
+    Assert-True ((Get-Status $report 'Role assignments on primary storage account stprimarytest') -contains 'Ready') 'the reused primary account was not checked in the hybrid layout'
 
     Set-HybridParameters '10.1.2.0/25'
     $fakeAzRules = $commonRules + (Get-HybridRules $false) + (Get-ExistingRules -PrimaryEndpoints @('pe-primary-file-a', 'pe-primary-file-b') -SecondaryEndpoints @())
@@ -330,6 +385,8 @@ param alertEmailAddresses = ['alerts@replication.test']
     $secondaryAccount = @($report.Prerequisites | Where-Object Item -eq 'secondary account (new)')
     Assert-True ($secondaryAccount.Count -eq 1 -and $secondaryAccount[0].Status -eq 'To be created' -and $secondaryAccount[0].Detail -like '* in rg-missing.') 'a new account without a name was not placed in its resource group'
     Assert-True ((Get-Status $report 'Registry (new)') -contains 'To be created') 'a new registry in a custom resource group was not reported as to be created'
+    $layoutPermissionItems = @(Get-PermissionRows $report | ForEach-Object Item)
+    Assert-True ($layoutPermissionItems.Count -eq 3 -and $layoutPermissionItems -contains 'Role assignments on resource group rg-shared' -and $layoutPermissionItems -contains 'Role assignments on resource group rg-foreign' -and $layoutPermissionItems -contains 'Role assignments on subscription Test subscription') "new services were not checked in their resource groups: $($layoutPermissionItems -join '; ')"
 
     # A placeholder that an override replaces no longer blocks lookups and what-if.
     $placeholderFile = Join-Path $workRoot 'existing.placeholder.bicepparam'
