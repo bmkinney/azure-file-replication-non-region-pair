@@ -7,29 +7,29 @@ Deploy private, active/passive Azure Files replication across two selected Azure
 ## Topology
 
 - One workload resource group for replication compute and supporting resources. The existing-resource profile can also use one resource group per region or per service.
-- One split-horizon Private DNS resource group per region in the greenfield profile.
+- One split-horizon Private DNS resource group per region in a greenfield deployment.
 - One VNet per region with a delegated `default` subnet and a `storage` private endpoint subnet.
 - No VNet peering.
 - One Azure Files account/share and one blob account/container per region.
 - Each VNet has Azure Files private endpoints for both file accounts.
 - Each VNet has its own same-named Private DNS zone instance. This split-horizon design prevents an unpeered VNet from resolving the other region's unreachable private endpoint address.
 - One internal Container Apps environment and AzCopy job per region. Each environment is a workload profiles environment on its delegated subnet and runs the job on the serverless Consumption profile. Environment zone redundancy is disabled to reduce regional capacity requirements; resilience is provided by the independent regional workers.
-- The greenfield profile uses ZRS for primary storage and LRS for secondary storage. Confirm those SKUs are available in the selected regions before deployment.
+- A greenfield deployment uses ZRS for primary storage and LRS for secondary storage. Confirm those SKUs are available in the selected regions before deployment.
 - A Premium ACR in the primary region with geo-replication to the secondary region and a private endpoint in each VNet.
 - Regional Log Analytics workspaces.
 - One shared Azure Monitor email Action Group, two job-failure metric alerts, and one freshness query alert per regional workspace.
 
-The existing-resource profile keeps this topology but reuses what already exists. For each storage account and share, regional network, and the registry, a mode parameter either reuses the service or creates it as the greenfield profile would. A new VNet gets its own split-horizon zones. `newSubnet` adds only a delegated job subnet to an existing VNet. Private endpoints are created for every new service and in every new VNet, which keeps the local-endpoint layout below for them. The exception is an existing registry that the jobs reach through its public endpoint, with `registryPrivateEndpointsEnabled = false`, which gets no endpoints.
+The existing-resource profile keeps this topology but reuses what already exists. For each storage account and share, regional network, and the registry, a mode parameter either reuses the service or creates it as a greenfield deployment would. A new VNet gets its own split-horizon zones. `newSubnet` adds only a delegated job subnet to an existing VNet. Private endpoints are created for every new service and in every new VNet, which keeps the local-endpoint layout below for them. The exception is an existing registry that the jobs reach through its public endpoint, with `registryPrivateEndpointsEnabled = false`, which gets no endpoints.
 
 Most resources that the deployment creates can take custom names. Each region's compute, which is its identity, Log Analytics workspace, Container Apps environment, and job, goes in that region's resource group; both regions can share one group. Monitoring goes with the primary region's compute. New storage accounts, VNets, the registry, private endpoints, and private DNS zones can each go in a resource group of their own. See [Reuse or create each service](../README.md#reuse-or-create-each-service) and [Customize the parameter file](../README.md#customize-the-parameter-file) in the README.
 
-Container Apps environments on a VNet are workload profiles environments, which need a subnet of at least `/27` delegated to `Microsoft.App/environments`. The greenfield profile and new VNets use a `/23` job subnet.
+Container Apps environments on a VNet are workload profiles environments, which need a subnet of at least `/27` delegated to `Microsoft.App/environments`. Greenfield deployments and new VNets use a `/23` job subnet.
 
 ### Server-side copy requirement
 
 AzCopy copies file data directly between the two storage services. With private endpoints, each job's network must have private access to both storage accounts in one of two layouts:
 
-- **Local endpoints.** The job VNet contains private endpoints for both accounts, and DNS in that VNet resolves both account names to them. The greenfield profile uses this layout with split-horizon DNS.
+- **Local endpoints.** The job VNet contains private endpoints for both accounts, and DNS in that VNet resolves both account names to them. A greenfield deployment uses this layout with split-horizon DNS.
 - **Direct peering.** The job runs in the VNet that contains its source account's private endpoint, and the two regional VNets are directly peered.
 
 Reaching the other region only through a hub VNet or Virtual WAN hub fails with `403 CannotVerifyCopySource`. For the existing-resource profile, confirm one of these layouts before deployment; see the [README](../README.md#network-requirements-for-server-side-copy).
