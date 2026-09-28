@@ -31,6 +31,14 @@ Assert-True (@($template.parameters.existingPrivateEndpointIds.defaultValue).Cou
 Assert-True ($template.parameters.secondaryResourceGroupName.defaultValue -eq "[parameters('resourceGroupName')]") 'secondaryResourceGroupName must default to resourceGroupName'
 Assert-True (@($template.parameters.existingResourceGroups.defaultValue).Count -eq 0) 'existingResourceGroups must default to an empty list'
 
+# Identities default to new and the deployment assigns their roles, as in earlier versions.
+Assert-True ($template.parameters.identityMode.defaultValue -eq 'new') 'identityMode must default to new'
+Assert-True (@($template.parameters.identityMode.allowedValues) -join ',' -eq 'new,existing') 'identity modes must be new and existing'
+Assert-True ($template.parameters.createRoleAssignments.defaultValue -eq $true) 'createRoleAssignments must default to true'
+foreach ($parameter in 'primaryIdentityId', 'secondaryIdentityId') {
+    Assert-True ($template.parameters.$parameter.defaultValue -eq '') "$parameter must be optional"
+}
+
 # Custom names are optional, and an unknown key is rejected rather than ignored.
 $namesType = $template.definitions.resourceNamesType
 Assert-True ($namesType.additionalProperties -eq $false) 'resourceNames must be a sealed object'
@@ -89,6 +97,43 @@ foreach ($side in 'primary', 'secondary') {
     Assert-True (([string]$region.properties.parameters.jobName.value).Contains("resourceNames')") ) "${side}Region ignores resourceNames for the job name"
 }
 
+# The role assignment modules run only with createRoleAssignments, and each identity module reuses an identity in existing mode.
+foreach ($name in 'primaryStorageRbac', 'secondaryStorageRbac', 'registryRbac') {
+    $module = Get-Resource $name
+    Assert-True ([string]$module.condition -eq "[parameters('createRoleAssignments')]") "$name must depend on createRoleAssignments"
+    Assert-True (([string]$module.properties.parameters.principalIds.value).StartsWith('[union(')) "$name must not assign a role twice when both jobs reuse one identity"
+}
+foreach ($side in 'primary', 'secondary') {
+    $module = Get-Resource "${side}Identity"
+    Assert-True ([string]$module.properties.parameters.existingIdentityId -eq "[if(equals(parameters('identityMode'), 'existing'), createObject('value', parameters('${side}IdentityId')), createObject('value', ''))]") "${side}Identity doesn't reuse ${side}IdentityId in existing mode"
+}
+
+# The output lists every assignment with the name its module gives it, so that scripts can check and create them.
+$listed = $template.outputs.jobRoleAssignments
+Assert-True ($listed.type -eq 'array' -and $listed.copy.count -eq '[length(range(0, 6))]') 'the template must output the six job role assignments'
+foreach ($property in 'name', 'scope', 'principalId', 'principalName', 'roleDefinitionId', 'roleName') {
+    Assert-True ($null -ne $listed.copy.input.$property) "the jobRoleAssignments output lacks $property"
+}
+Assert-True ([string]$listed.copy.input.name -match "^\[guid\(createArray\(.+\)\[div\(range\(0, 6\)\[copyIndex\(\)\], 2\)\]\.scope, createArray\(.+\)\[mod\(range\(0, 6\)\[copyIndex\(\)\], 2\)\]\.principalId, subscriptionResourceId\('Microsoft\.Authorization/roleDefinitions', createArray\(.+\)\[div\(range\(0, 6\)\[copyIndex\(\)\], 2\)\]\.roleDefinitionId\)\)\]$") "the jobRoleAssignments names don't use the modules' formula: $($listed.copy.input.name)"
+foreach ($scope in "variables('primaryStorageName')", "variables('secondaryStorageName')", "variables('registryResolvedName')", "reference('newPrimaryStorage').outputs.id.value", "reference('newRegistry').outputs.id.value") {
+    Assert-True (([string]$listed.copy.input.scope).Contains($scope)) "the jobRoleAssignments scopes ignore $scope"
+}
+$rbacModules = @{
+    primaryStorageRbac = @{ Type = 'Microsoft.Storage/storageAccounts'; NameParameter = 'storageAccountName'; RoleVariable = 'fileDataRoleDefinitionId'; RoleId = '69566ab7-960f-475b-8e7c-b3118f30c6bd' }
+    registryRbac       = @{ Type = 'Microsoft.ContainerRegistry/registries'; NameParameter = 'registryName'; RoleVariable = 'acrPullRoleDefinitionId'; RoleId = '7f951dda-4ed3-4680-a7ca-43fe172d538d' }
+}
+foreach ($name in $rbacModules.Keys) {
+    $expected = $rbacModules[$name]
+    $nested = (Get-Resource $name).properties.template
+    $assignment = @($nested.resources)[0]
+    Assert-True ($assignment.name -eq "[guid(resourceId('$($expected.Type)', parameters('$($expected.NameParameter)')), parameters('principalIds')[copyIndex()], variables('$($expected.RoleVariable)'))]") "$name names its assignments differently from the jobRoleAssignments output: $($assignment.name)"
+    Assert-True ($nested.variables.($expected.RoleVariable) -eq "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '$($expected.RoleId)')]") "$name assigns another role than the jobRoleAssignments output lists"
+    Assert-True (([string]$listed.copy.input.roleDefinitionId).Contains("'$($expected.RoleId)'")) "the jobRoleAssignments output doesn't list role $($expected.RoleId)"
+}
+foreach ($output in 'createRoleAssignments', 'registryCreated') {
+    Assert-True ($null -ne $template.outputs.$output) "the template must output $output"
+}
+
 # Resource groups are created from the placement plan, except the ones listed as existing, and carry the input validation.
 $groups = Get-Resource 'createdResourceGroups'
 Assert-True ([string]$groups.copy.count -eq "[length(items(variables('groupsToCreate')))]") 'resource groups must be created from groupsToCreate'
@@ -102,6 +147,8 @@ Assert-True (([string]$template.variables.validatedTags).Contains('fail(')) 'inp
 $validation = [string]$template.variables.inputErrors
 Assert-True ($validation.Contains("parameters('primaryDnsResourceGroupName')") -and $validation.Contains("parameters('secondaryDnsResourceGroupName')")) 'two new VNets sharing a DNS resource group must be rejected'
 Assert-True ($validation.Contains("parameters('primaryRegionCode')") -and $validation.Contains("parameters('secondaryRegionCode')")) 'identical region codes must be rejected'
+Assert-True ($validation.Contains('identityMode is existing, so set primaryIdentityId and secondaryIdentityId.')) 'reused identities without resource IDs must be rejected'
+Assert-True ($validation.Contains("variables('primaryIdentityIdValid')") -and $validation.Contains("variables('secondaryIdentityIdValid')")) 'identity IDs outside the deployment subscription must be rejected'
 
 # Parameter files compile for the example and for single, per-region, and per-service layouts; unknown values are rejected.
 $workRoot = Join-Path ([IO.Path]::GetTempPath()) "existing-profile-test-$([guid]::NewGuid().ToString('N'))"
@@ -154,6 +201,17 @@ param resourceNames = {
     Assert-True (Test-Compiles 'service' $perService) 'a per-service layout with custom names does not compile'
     Assert-True (-not (Test-Compiles 'unknown-name' ($perService -replace 'actionGroup:', 'actionGrop:'))) 'an unknown resourceNames key was accepted'
     Assert-True (-not (Test-Compiles 'unknown-target' "$base`nparam primaryEndpointsToCreate = ['firewall']")) 'an unknown endpoint target was accepted'
+
+    $identityRoot = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-identities/providers/Microsoft.ManagedIdentity/userAssignedIdentities'
+    $pipeline = @"
+$base
+param createRoleAssignments = false
+param identityMode = 'existing'
+param primaryIdentityId = '$identityRoot/id-replication-eus2'
+param secondaryIdentityId = '$identityRoot/id-replication-wus2'
+"@
+    Assert-True (Test-Compiles 'pipeline' $pipeline) 'a parameter file with reused identities and separately granted roles does not compile'
+    Assert-True (-not (Test-Compiles 'unknown-identity-mode' "$base`nparam identityMode = 'shared'")) 'an unknown identityMode was accepted'
 
     # The complete parameter files in README.md must compile, so the documented examples can't drift from the template.
     $readme = [IO.File]::ReadAllText((Join-Path $repositoryRoot 'README.md'))

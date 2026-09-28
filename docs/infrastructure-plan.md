@@ -38,7 +38,7 @@ Reaching the other region only through a hub VNet or Virtual WAN hub fails with 
 
 ### Runtime managed identities
 
-The deployment creates a user-assigned managed identity for each regional Container Apps Job. Bicep creates all runtime role assignments; operators do not need to grant them separately.
+Each regional Container Apps Job runs as a user-assigned managed identity. By default, the deployment creates both identities and all runtime role assignments, so operators don't grant them separately. The existing-resource profile can reuse identities that already exist instead (`identityMode = 'existing'`), and with `createRoleAssignments = false`, either profile leaves the assignments to an access administrator, who grants them once with `scripts/grant-access.ps1`.
 
 | Principal | Built-in role | Scope | Reason |
 | --- | --- | --- | --- |
@@ -49,27 +49,32 @@ The deployment creates a user-assigned managed identity for each regional Contai
 | Primary job identity | AcrPull (`7f951dda-4ed3-4680-a7ca-43fe172d538d`) | ACR | Pull the digest-pinned worker image |
 | Secondary job identity | AcrPull (`7f951dda-4ed3-4680-a7ca-43fe172d538d`) | ACR | Pull the digest-pinned worker image |
 
-The storage role is a data-plane role. Contributor, Storage Account Contributor, or another management-plane role alone cannot authorize AzCopy file operations. Both job identities intentionally receive the role on both accounts because replication direction changes during failover. The role is assigned at storage-account scope because each account contains the single replication share managed by this solution.
+The storage role is a data-plane role. Contributor, Storage Account Contributor, or another management-plane role alone cannot authorize AzCopy file operations. Both job identities intentionally receive the role on both accounts because replication direction changes during failover. The role is assigned at storage-account scope because each account contains the single replication share managed by this solution. A registry with ABAC repository permissions ignores AcrPull; the identities need Container Registry Repository Reader there instead.
+
+Every deployment lists these six assignments in its `jobRoleAssignments` output, with the names that the templates give them, whether or not it creates them.
 
 ### Deployment principal
 
-The deployment principal performs subscription-scope deployments and creates role assignments. Use one of these models:
+The deployment principal performs subscription-scope deployments. With `createRoleAssignments = true`, the default, it also creates the job identities' role assignments. Use one of these models:
 
 | Model | Assignment | Notes |
 | --- | --- | --- |
 | Simple | Owner at the deployment subscription | Covers resource-group creation, resource deployment, and role assignment creation |
 | Separated | Contributor plus Role Based Access Control Administrator at the deployment subscription | Separates resource management from access management; equivalent custom roles are also valid |
-| Constrained | Contributor on the replication resource groups, plus Role Based Access Control Administrator with a condition that allows only AcrPull and Storage File Data Privileged Contributor for service principals, on each storage account and the registry | Limits delegated access management to the six assignments the deployment creates; the README shows the [condition](../README.md#rbac-requirements) |
+| Constrained | Contributor on the replication resource groups, plus Role Based Access Control Administrator with a condition that allows only AcrPull and Storage File Data Privileged Contributor for service principals, on each storage account and the registry | Limits delegated access management to the six assignments the deployment creates; the README shows the [condition](../README.md#deploying-identity-that-assigns-the-roles). The condition doesn't limit the principals, so a pipeline identity could grant itself those roles. |
+| Separately granted roles | Contributor-level rights only, with `createRoleAssignments = false`; see the [pipeline identity rights](../README.md#pipeline-identity-rights) | The deployment creates no role assignments, so neither deployments nor direction switches need the right to create them. An access administrator grants the six assignments once. |
+
+The deployment principal can be a user, a service principal, or a managed identity; Microsoft Entra ID represents managed identities as service principals, so the same roles apply. The README describes how to [deploy with a pipeline identity](../README.md#deploy-with-a-pipeline-identity).
 
 At minimum, an equivalent custom deployment role must allow:
 
 - subscription-scope deployments and resource-group creation;
 - creation and update of the storage, network, private DNS, managed identity, ACR, Log Analytics, Container Apps, and Azure Monitor resources declared by the selected profile;
 - `Microsoft.ManagedIdentity/userAssignedIdentities/assign/action` so the two identities can be attached to the regional jobs;
-- `Microsoft.Authorization/roleAssignments/write` and `Microsoft.Authorization/roleAssignments/delete` at each storage-account and ACR scope; and
+- with `createRoleAssignments = true`, `Microsoft.Authorization/roleAssignments/write` and `Microsoft.Authorization/roleAssignments/delete` at each storage-account and ACR scope; and
 - read access to every existing resource referenced by the brownfield profile.
 
-The existing-resource profile also executes nested deployments in the resource groups containing the reused storage accounts and ACR, in the resource group of a VNet that gets a new job subnet, and in every resource group that receives resources it creates. The deployment principal therefore needs resource-group deployment permission in those resource groups and role-assignment permission on the target resources. The current template accepts resource-group names but not subscription IDs, so the workload and every reused storage account, network resource, private endpoint, and ACR must be in the same subscription. Private DNS zones named by resource ID can be in another subscription.
+With `createRoleAssignments = true`, the existing-resource profile also executes nested deployments in the resource groups containing the reused storage accounts and ACR. In both modes, it executes nested deployments in the resource group of a VNet that gets a new job subnet, and in every resource group that receives resources it creates. The deployment principal therefore needs resource-group deployment permission in those resource groups, and, when it creates role assignments, role-assignment permission on the target resources. The current template accepts resource-group names but not subscription IDs, so the workload and every reused storage account, network resource, private endpoint, ACR, and job identity must be in the same subscription. Private DNS zones named by resource ID can be in another subscription.
 
 When the existing-resource profile creates services, it places each one in its own resource group parameter or else in its region's resource group, and it places the private endpoints it creates in the endpoint resource group of their VNet. A new VNet's split-horizon zones go in their own DNS resource groups. The deployment creates each of these resource groups unless it's listed in `existingResourceGroups`; see the [README](../README.md#choose-the-resource-groups). The principal also needs:
 
@@ -82,16 +87,22 @@ The README's [troubleshooting section](../README.md#deployment-errors) maps the 
 
 Validation and what-if can't confirm the role assignment rights. The nested deployments that create the assignments depend on the job identities' principal IDs, which exist only once the deployment runs, so Azure reports them as `NestedDeploymentShortCircuited` and checks their permissions only when it starts them. A missing right therefore fails the deployment after the identities are created, before any job exists. `scripts/inventory.ps1` checks these rights beforehand, and `scripts/deploy.ps1` and `scripts/switch-direction.ps1` list the refused scopes when a deployment fails on them.
 
+### Access administrator
+
+With `createRoleAssignments = false`, an access administrator grants the six job identity assignments once, with `scripts/grant-access.ps1`: after the first deployment, from that deployment's `jobRoleAssignments` output, or before it, for reused identities and existing storage accounts and registry, from their resource IDs. The administrator needs `Microsoft.Authorization/roleAssignments/write` on both storage accounts and the registry, through Owner, User Access Administrator, or Role Based Access Control Administrator, which can be constrained to the two roles. The script creates only missing assignments, and makes no Microsoft Graph calls. Because the deployment principal controls a deployment's outputs, the script grants only the two job roles, on storage accounts and registries in the current subscription, to user-assigned identities in it, and it shows the identities as Azure reports them, so that the administrator can confirm them with `-WhatIf` before granting.
+
+`scripts/deploy.ps1` checks the assignments after its bootstrap deployment and before it builds the image or activates the schedule. If any are missing, it closes a registry that the templates create and that it opened for the build, prints the grant command, and stops; rerunning it after the grant completes the deployment. Until then, both jobs stay unscheduled.
+
 ### Deployment script and ACR
 
 `scripts/deploy.ps1` can either consume a prebuilt digest-pinned image or run an ACR Task build and inspect its manifest:
 
-- With `-ContainerImage`, no image build or manifest lookup is performed, and a registry that the templates create stays closed to public network access in both deployment stages. The deployment principal still needs the management-plane and role-assignment permissions above.
-- Without `-ContainerImage`, the principal must be able to queue an ACR Task build, push the resulting image, and read repository manifest metadata. For a registry that does not use repository-scoped ABAC, assign AcrPush on the registry in addition to the required management-plane access. Network access to the private registry must also be available from the command environment. A registry that the templates create is opened to public network access for the bootstrap deployment and the build, and closed again by the final deployment.
+- With `-ContainerImage`, no image build or manifest lookup is performed, and a registry that the templates create stays closed to public network access in both deployment stages. The deployment principal still needs the management-plane permissions above, and with `createRoleAssignments = true`, the role-assignment permissions.
+- Without `-ContainerImage`, the principal must be able to queue an ACR Task build, push the resulting image, and read repository manifest metadata: Container Registry Tasks Contributor plus AcrPush on the registry, or Container Registry Repository Writer instead of AcrPush for a registry with repository-scoped ABAC. Contributor on a registry without ABAC covers both. Network access to the private registry must also be available from the command environment. A registry that the templates create is opened to public network access for the bootstrap deployment and the build, and closed again by the final deployment, or by a hold deployment when the job identities' roles are still missing.
 
 ### Operational access
 
-- `scripts/switch-direction.ps1` performs another subscription deployment. The failover operator therefore needs the same deployment and role-assignment permissions described above, including role assignment rights on both storage accounts and the registry. Confirm them, and activate any eligible Privileged Identity Management role in a test, before an outage. A switch that fails on these rights leaves the replication direction unchanged, because the jobs deploy only after their role assignments.
+- `scripts/switch-direction.ps1` performs another subscription deployment. The failover operator therefore needs the same deployment permissions described above. With `createRoleAssignments = true`, that includes role assignment rights on both storage accounts and the registry; confirm them, and activate any eligible Privileged Identity Management role in a test, before an outage. A switch that fails on these rights leaves the replication direction unchanged, because the jobs deploy only after their role assignments. With `createRoleAssignments = false`, a switch doesn't touch the role assignments, and the script warns afterward if a job identity lacks one.
 - Starting a job requires `Microsoft.App/jobs/start/action`, which is privileged: a start request can override the image, command, and environment variables, and the execution runs as the job's managed identity with data access to both shares. Grant start and stop rights only to replication operators. Starting the standby job without an override performs a real reverse synchronization; use a `DRY_RUN=true` execution override for readiness tests.
 - Users investigating failures need read access to the Container Apps Jobs, alert resources, and Log Analytics workspaces. Querying workspace data also requires a Log Analytics data-query role, such as Log Analytics Reader, at the workspace or a parent scope.
 
@@ -104,7 +115,13 @@ Validation and what-if can't confirm the role assignment rights. The nested depl
 
 ### Verify assignments
 
-After deployment, resolve the two job identity principal IDs and verify that each has the two storage assignments and one registry assignment:
+After deployment, list the assignments that the job identities need, and check which exist, with the name of the latest deployment:
+
+```powershell
+pwsh ./scripts/grant-access.ps1 -DeploymentName '<deployment-name>' -WhatIf
+```
+
+Or resolve the two job identity principal IDs and verify that each has the two storage assignments and one registry assignment:
 
 ```powershell
 az identity list --resource-group <replication-resource-group> --query "[].{name:name, principalId:principalId}" --output table

@@ -50,6 +50,9 @@ param replicationLagThresholdMinutes int = 30
 @description('Creates and enables Azure Monitor alerting resources when true.')
 param monitoringEnabled bool = true
 
+@description('Assigns the job identities their roles on the storage accounts and the registry, which needs the right to create role assignments. Set to false when an administrator grants the roles after the first deployment, with scripts/grant-access.ps1.')
+param createRoleAssignments bool = true
+
 param tags object = {
   Environment: environmentName
   Workload: 'azure-files-dr-replication'
@@ -87,6 +90,7 @@ module foundation 'modules/foundation.bicep' = {
     containerImage: containerImage
     acrPublicNetworkAccess: acrPublicNetworkAccess
     scheduleCronExpression: scheduleCronExpression
+    createRoleAssignments: createRoleAssignments
     tags: tags
   }
 }
@@ -127,3 +131,6 @@ output primaryFailureAlertId string = monitoring.outputs.primaryFailureAlertId
 output secondaryFailureAlertId string = monitoring.outputs.secondaryFailureAlertId
 output primaryFreshnessAlertId string = monitoring.outputs.primaryFreshnessAlertId
 output secondaryFreshnessAlertId string = monitoring.outputs.secondaryFreshnessAlertId
+output createRoleAssignments bool = createRoleAssignments
+output registryCreated bool = true
+output jobRoleAssignments array = foundation.outputs.jobRoleAssignments

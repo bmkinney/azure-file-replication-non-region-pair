@@ -1,6 +1,7 @@
 $ErrorActionPreference = 'Stop'
 
-# Compiles the foundation modules and checks the Container Apps environment and job contract; no Azure calls are made.
+# Compiles the foundation modules and checks the Container Apps environment and job contract, and the job identities'
+# role assignments; no Azure calls are made.
 
 function Assert-True([bool]$Condition, [string]$Message) {
     if (-not $Condition) {
@@ -45,6 +46,45 @@ foreach ($moduleName in $expectedCounts.Keys) {
         $jobProfile = Resolve-TemplateValue $template $job.properties.workloadProfileName
         Assert-True ($jobProfile -and $profileNames -contains $jobProfile) "$moduleName job $($job.name) must run on the declared Consumption workload profile"
     }
+
+    if ($moduleName -eq 'foundation.bicep') {
+        # With createRoleAssignments = false an administrator grants the six assignments, which the output lists either way.
+        $assignments = @($resources | Where-Object { $_.type -eq 'Microsoft.Authorization/roleAssignments' })
+        Assert-True ($assignments.Count -eq 6) "foundation.bicep declares $($assignments.Count) role assignments; expected 6"
+        foreach ($assignment in $assignments) {
+            Assert-True ($assignment.condition -eq "[parameters('createRoleAssignments')]") "role assignment $($assignment.name) doesn't depend on createRoleAssignments"
+            Assert-True ([string]$assignment.name -match "^\[guid\(resourceId\('Microsoft\.(Storage/storageAccounts|ContainerRegistry/registries)', variables\('[^']+'\)\), resourceId\('Microsoft\.ManagedIdentity/userAssignedIdentities', variables\('(primary|secondary)IdentityName'\)\), variables\('(fileData|acrPull)RoleDefinitionId'\)\)\]$") "role assignment name '$($assignment.name)' no longer matches the jobRoleAssignments output"
+        }
+        $listed = $template.outputs.jobRoleAssignments
+        Assert-True ($listed.type -eq 'array' -and $listed.copy.count -eq '[length(range(0, 6))]') 'foundation.bicep must output the six job role assignments'
+        foreach ($property in 'name', 'scope', 'principalId', 'principalName', 'roleDefinitionId', 'roleName') {
+            Assert-True ($null -ne $listed.copy.input.$property) "the jobRoleAssignments output lacks $property"
+        }
+        # The names must equal the resources' names, which use each identity's resource ID rather than its principal ID.
+        Assert-True ([string]$listed.copy.input.name -match "^\[guid\(variables\('jobRoleTargets'\)\[div\(range\(0, 6\)\[copyIndex\(\)\], 2\)\]\.scope, createArray\(createObject\('id', resourceId\('Microsoft\.ManagedIdentity/userAssignedIdentities'") "the jobRoleAssignments names don't use the formula of the role assignments: $($listed.copy.input.name)"
+        $targets = @($template.variables.jobRoleTargets)
+        Assert-True ($targets.Count -eq 3) 'jobRoleTargets must list both storage accounts and the registry'
+        $roleIds = @($assignments | ForEach-Object { [string]$_.properties.roleDefinitionId } | Sort-Object -Unique)
+        foreach ($target in $targets) {
+            $roleVariable = if ($target.roleDefinitionId -eq '7f951dda-4ed3-4680-a7ca-43fe172d538d') { 'acrPullRoleDefinitionId' } else { 'fileDataRoleDefinitionId' }
+            Assert-True ($template.variables.$roleVariable -eq "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '$($target.roleDefinitionId)')]") "role $($target.roleName) doesn't match $roleVariable"
+            Assert-True ($roleIds -contains "[variables('$roleVariable')]") "no role assignment uses $roleVariable"
+        }
+    }
+}
+
+# main.bicep passes createRoleAssignments through and reports the assignments for scripts/deploy.ps1 and scripts/grant-access.ps1.
+$mainJson = (& az bicep build --file (Join-Path $PSScriptRoot '../infra/main.bicep') --stdout) -join [Environment]::NewLine
+if ($LASTEXITCODE -ne 0) {
+    throw 'Failed to compile main.bicep.'
+}
+$main = $mainJson | ConvertFrom-Json -Depth 100
+Assert-True ($main.parameters.createRoleAssignments.defaultValue -eq $true) 'createRoleAssignments must default to true in main.bicep'
+$mainResources = if ($main.resources -is [array]) { $main.resources } else { @($main.resources.PSObject.Properties.Value) }
+$foundation = @($mainResources | Where-Object { $_.type -eq 'Microsoft.Resources/deployments' -and $_.name -eq 'storage-replication-foundation' })[0]
+Assert-True ($foundation.properties.parameters.createRoleAssignments.value -eq "[parameters('createRoleAssignments')]") 'main.bicep must pass createRoleAssignments to the foundation'
+foreach ($output in 'createRoleAssignments', 'registryCreated', 'jobRoleAssignments') {
+    Assert-True ($null -ne $main.outputs.$output) "main.bicep must output $output"
 }
 
 Write-Host 'Foundation template contract checks passed.'

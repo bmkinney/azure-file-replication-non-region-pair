@@ -15,3 +15,4 @@ param alertEmailAddresses = [
 ]
 param replicationLagThresholdMinutes = 30
 param monitoringEnabled = true
+param createRoleAssignments = true

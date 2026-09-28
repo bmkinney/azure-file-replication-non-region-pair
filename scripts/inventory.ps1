@@ -83,6 +83,10 @@ function Add-LookupFailure {
 }
 
 $roleAssignmentTargets = [System.Collections.Generic.List[object]]::new()
+# Reused job identities, with their principal IDs, when identityMode is existing.
+$jobIdentities = [System.Collections.Generic.List[object]]::new()
+# A registry with ABAC repository permissions ignores AcrPull; the jobs need Container Registry Repository Reader.
+$registryUsesAbac = $false
 
 # Records a scope where the deployment assigns a role to the job identities. For a resource that doesn't exist yet, the
 # right to assign roles comes from its resource group, or from the subscription when the deployment creates the group.
@@ -90,19 +94,25 @@ function Add-RoleAssignmentTarget {
     param([Parameter(Mandatory)][string]$Role, [string]$ResourceId, [string]$Label, [string]$ResourceGroup, [string]$GroupState)
 
     if ($ResourceId) {
-        $target = @{ Scope = $ResourceId; Item = $Label; NewGroup = '' }
+        $target = @{ Scope = $ResourceId; Item = $Label; NewGroup = ''; Exists = $true }
     } elseif ($GroupState -eq 'Missing') {
-        $target = @{ Scope = "/subscriptions/$subscriptionId"; Item = "subscription $($account.Value.name)"; NewGroup = $ResourceGroup }
+        $target = @{ Scope = "/subscriptions/$subscriptionId"; Item = "subscription $($account.Value.name)"; NewGroup = $ResourceGroup; Exists = $false }
     } else {
-        $target = @{ Scope = "/subscriptions/$subscriptionId/resourceGroups/$ResourceGroup"; Item = "resource group $ResourceGroup"; NewGroup = '' }
+        $target = @{ Scope = "/subscriptions/$subscriptionId/resourceGroups/$ResourceGroup"; Item = "resource group $ResourceGroup"; NewGroup = ''; Exists = $false }
     }
     $roleAssignmentTargets.Add([pscustomobject]($target + @{ Role = $Role }))
 }
 
+# Matches an action against an action pattern of a role as Azure does: * matches any text, and a /*/ segment can also
+# be empty, so Managed Identity Operator's userAssignedIdentities/*/assign/action covers userAssignedIdentities/assign/action.
+function Test-ActionMatch([string]$Action, [string]$Pattern) {
+    $expression = [regex]::Escape($Pattern) -replace '/\\\*/', '(/.*)?/' -replace '\\\*', '.*'
+    return $Action -match "^$expression$"
+}
+
 # Evaluates the signed-in identity's role assignments at the scope. Deny assignments, role assignment conditions, and
 # roles that are only eligible through Privileged Identity Management aren't reflected.
-function Test-RoleAssignmentRight([string]$Scope) {
-    $action = 'Microsoft.Authorization/roleAssignments/write'
+function Test-Permission([string]$Scope, [string]$Action) {
     $arguments = @('rest', '--method', 'get', '--url', "$Scope/providers/Microsoft.Authorization/permissions", '--url-parameters', 'api-version=2022-04-01')
     for ($page = 0; $page -lt 10 -and $arguments; $page++) {
         $result = Invoke-Az -Arguments $arguments
@@ -110,8 +120,8 @@ function Test-RoleAssignmentRight([string]$Scope) {
             return [pscustomobject]@{ Allowed = $null; Error = $result.Error }
         }
         foreach ($entry in @(Get-Property $result.Value 'value')) {
-            $granted = @(Get-Property $entry 'actions' | Where-Object { $action -like $_ })
-            $excluded = @(Get-Property $entry 'notActions' | Where-Object { $action -like $_ })
+            $granted = @(Get-Property $entry 'actions' | Where-Object { Test-ActionMatch $Action $_ })
+            $excluded = @(Get-Property $entry 'notActions' | Where-Object { Test-ActionMatch $Action $_ })
             if ($granted.Count -gt 0 -and $excluded.Count -eq 0) {
                 return [pscustomobject]@{ Allowed = $true; Error = $null }
             }
@@ -203,6 +213,9 @@ function Get-ParameterValue([string]$Name) {
 
 $isExistingProfile = $null -ne (Get-Property $templateParameters 'primaryStorageAccountName')
 $profileName = if ($isExistingProfile) { 'existing resources (infra/existing.bicep)' } else { 'greenfield (infra/main.bicep)' }
+# createRoleAssignments = false leaves the job identities' roles to an administrator, who grants them with scripts/grant-access.ps1.
+$createRoleAssignments = (Get-ParameterValue 'createRoleAssignments') -ne $false
+$reusesIdentities = $isExistingProfile -and [string](Get-ParameterValue 'identityMode') -eq 'existing'
 $primaryLocation = Get-ParameterValue 'primaryLocation'
 $secondaryLocation = Get-ParameterValue 'secondaryLocation'
 if (-not $Location) {
@@ -780,7 +793,9 @@ if ($isExistingProfile -and -not $hasPlaceholders) {
             $registrySku = [string](Get-Property $registry 'sku.name')
             $registryDetail = "sku=$registrySku, publicNetworkAccess=$(Get-Property $registry 'publicNetworkAccess')"
             if ((Get-Property $registry 'roleAssignmentMode') -match '(?i)abac') {
-                Add-Prerequisite -Area 'Registry' -Item $registryName -Status 'Warning' -Detail "ABAC repository permissions are enabled, so AcrPull is not honored; assign Container Registry Repository Reader to both job identities. $registryDetail"
+                $registryUsesAbac = $true
+                $abacAction = if ($createRoleAssignments) { 'assign it to both job identities after the first deployment' } else { 'scripts/grant-access.ps1 assigns it' }
+                Add-Prerequisite -Area 'Registry' -Item $registryName -Status 'Warning' -Detail "ABAC repository permissions are enabled, so AcrPull is not honored, and the job identities need Container Registry Repository Reader instead; $abacAction. $registryDetail"
             } elseif ($registrySku -ne 'Premium' -and ($plans['primary'].registry -or $plans['secondary'].registry)) {
                 Add-Prerequisite -Area 'Registry' -Item $registryName -Status 'Action required' -Detail "A $registrySku registry doesn't support private endpoints, but the deployment would create one. Set registryPrivateEndpointsEnabled to false so that the jobs use its public endpoint. $registryDetail"
             } else {
@@ -831,6 +846,32 @@ if ($isExistingProfile -and -not $hasPlaceholders) {
             $registryId = "/subscriptions/$subscriptionId/resourceGroups/$(Get-ParameterValue 'registryResourceGroupName')/providers/Microsoft.ContainerRegistry/registries/$registryName"
         }
         Add-RoleAssignmentTarget -Role 'AcrPull' -ResourceId $registryId -Label "registry $registryName"
+    }
+
+    # Reused job identities must exist, and the signed-in identity must be able to attach them to the jobs.
+    if ($reusesIdentities) {
+        foreach ($role in 'primary', 'secondary') {
+            $identityId = [string](Get-ParameterValue "${role}IdentityId")
+            if (-not $identityId) {
+                Add-Prerequisite -Area 'Identity' -Item "$role job identity" -Status 'Action required' -Detail "identityMode is existing, so set ${role}IdentityId to the resource ID of a user-assigned identity."
+                continue
+            }
+            $item = "$role job identity $(Split-Path $identityId -Leaf)"
+            $identity = Invoke-Az -Arguments @('identity', 'show', '--ids', $identityId)
+            if (-not $identity.Succeeded) {
+                Add-LookupFailure -Area 'Identity' -Item $item -Result $identity -MissingDetail "Not found. Create the user-assigned identity, or correct ${role}IdentityId."
+                continue
+            }
+            $jobIdentities.Add([pscustomobject]@{ Id = $identityId; Name = [string](Get-Property $identity.Value 'name'); PrincipalId = [string](Get-Property $identity.Value 'principalId') })
+            $assign = Test-Permission $identityId 'Microsoft.ManagedIdentity/userAssignedIdentities/assign/action'
+            if ($null -eq $assign.Allowed) {
+                Add-Prerequisite -Area 'Identity' -Item $item -Status 'Not verified' -Detail "Exists. Could not read the signed-in identity's permissions on it. $($assign.Error)"
+            } elseif ($assign.Allowed) {
+                Add-Prerequisite -Area 'Identity' -Item $item -Status 'Ready' -Detail "Exists, and the signed-in identity can assign it to the $role job."
+            } else {
+                Add-Prerequisite -Area 'Identity' -Item $item -Status 'Action required' -Detail "Exists, but the signed-in identity can't assign it to the $role job. Grant Managed Identity Operator on the identity or its resource group."
+            }
+        }
     }
 
     $zones = Invoke-Az -Arguments @('network', 'private-dns', 'zone', 'list')
@@ -976,17 +1017,66 @@ foreach ($target in $roleAssignmentTargets) {
         $entry.NewGroups.Add($target.NewGroup)
     }
 }
-foreach ($entry in $assignmentScopes.Values) {
+foreach ($entry in @($assignmentScopes.Values | Where-Object { $createRoleAssignments })) {
     $item = "Role assignments on $($entry.Item)"
     $roles = $entry.Roles -join ' and '
     $note = if ($entry.NewGroups.Count -gt 0) { " The deployment creates resource group $($entry.NewGroups -join ', '), so the right must come from the subscription or above." } else { '' }
-    $right = Test-RoleAssignmentRight $entry.Scope
+    $right = Test-Permission $entry.Scope 'Microsoft.Authorization/roleAssignments/write'
     if ($null -eq $right.Allowed) {
         Add-Prerequisite -Area 'Permissions' -Item $item -Status 'Not verified' -Detail "Could not read the signed-in identity's permissions. $($right.Error)"
     } elseif ($right.Allowed) {
         Add-Prerequisite -Area 'Permissions' -Item $item -Status 'Ready' -Detail "The signed-in identity can assign $roles to the job identities.$note"
     } else {
-        Add-Prerequisite -Area 'Permissions' -Item $item -Status 'Action required' -Detail "The signed-in identity can't create role assignments here, so the deployment fails when it assigns $roles to the job identities. Grant Role Based Access Control Administrator, which can be limited to these roles, or User Access Administrator or Owner, at this scope or above. Activate the role first if it's eligible through Privileged Identity Management.$note"
+        Add-Prerequisite -Area 'Permissions' -Item $item -Status 'Action required' -Detail "The signed-in identity can't create role assignments here, so the deployment fails when it assigns $roles to the job identities. Grant Role Based Access Control Administrator, which can be limited to these roles, or User Access Administrator or Owner, at this scope or above. Activate the role first if it's eligible through Privileged Identity Management. Alternatively, set createRoleAssignments = false, so that an administrator grants the roles once with scripts/grant-access.ps1.$note"
+    }
+}
+
+if (-not $createRoleAssignments -and -not $hasPlaceholders) {
+    Add-Prerequisite -Area 'Permissions' -Item 'Role assignments' -Status 'Ready' -Detail "createRoleAssignments is false, so the deployment creates no role assignments, and the signed-in identity doesn't need the right to create them. An administrator grants the job identities' roles with scripts/grant-access.ps1; scripts/deploy.ps1 checks them before it activates the schedule."
+    if ($reusesIdentities -and $jobIdentities.Count -gt 0) {
+        # Reused identities can hold their roles before the first deployment, on the services that already exist.
+        $existingTargets = @($roleAssignmentTargets | Where-Object Exists)
+        $storageIds = @($existingTargets | Where-Object Role -ne 'AcrPull' | ForEach-Object Scope | Select-Object -Unique)
+        $registryIds = @($existingTargets | Where-Object Role -eq 'AcrPull' | ForEach-Object Scope | Select-Object -Unique)
+        $grantCommand = "pwsh ./scripts/grant-access.ps1 -IdentityId $(@($jobIdentities | ForEach-Object Id | Select-Object -Unique) -join ',')"
+        if ($storageIds.Count -gt 0) {
+            $grantCommand += " -StorageAccountId $($storageIds -join ',')"
+        }
+        if ($registryIds.Count -gt 0) {
+            $grantCommand += " -RegistryId $($registryIds[0])"
+        }
+        foreach ($target in $roleAssignmentTargets) {
+            $roleName = if ($target.Role -eq 'AcrPull' -and $registryUsesAbac) { 'Container Registry Repository Reader' } else { $target.Role }
+            $item = "Job identity roles on $($target.Item)"
+            if (-not $target.Exists) {
+                Add-Prerequisite -Area 'Permissions' -Item $item -Status 'To be created' -Detail "The deployment creates the resource. After the first deployment, an administrator grants $roleName on it to the job identities with scripts/grant-access.ps1 -DeploymentName <deployment>, which scripts/deploy.ps1 names."
+                continue
+            }
+            $roleId = switch ($roleName) {
+                'AcrPull' { '7f951dda-4ed3-4680-a7ca-43fe172d538d' }
+                'Container Registry Repository Reader' { 'b93aa761-3e63-49ed-ac28-beffa264f7ac' }
+                default { '69566ab7-960f-475b-8e7c-b3118f30c6bd' }
+            }
+            $lacking = [System.Collections.Generic.List[string]]::new()
+            $unreadable = $null
+            foreach ($identity in $jobIdentities) {
+                $held = Invoke-Az -Arguments @('role', 'assignment', 'list', '--scope', $target.Scope, '--assignee-object-id', $identity.PrincipalId, '--include-inherited', '--fill-principal-name', 'false', '--fill-role-definition-name', 'false', '--query', '[].roleDefinitionId')
+                if (-not $held.Succeeded) {
+                    $unreadable = $held.Error
+                } elseif (-not (@($held.Value) | Where-Object { $_ -and ([string]$_).EndsWith("/$roleId", [StringComparison]::OrdinalIgnoreCase) })) {
+                    $lacking.Add($identity.Name)
+                }
+            }
+            if ($unreadable) {
+                Add-Prerequisite -Area 'Permissions' -Item $item -Status 'Not verified' -Detail "Could not read the role assignments. $unreadable"
+            } elseif ($lacking.Count -gt 0) {
+                Add-Prerequisite -Area 'Permissions' -Item $item -Status 'Action required' -Detail "$($lacking -join ' and ') $(if ($lacking.Count -gt 1) { 'lack' } else { 'lacks' }) $roleName here, so replication fails until an administrator grants it: $grantCommand"
+            } else {
+                Add-Prerequisite -Area 'Permissions' -Item $item -Status 'Ready' -Detail "Both job identities hold $roleName."
+            }
+        }
+    } elseif (-not $reusesIdentities) {
+        Add-Prerequisite -Area 'Permissions' -Item 'Job identity roles' -Status 'To be created' -Detail "The deployment creates the job identities. After the first deployment, an administrator grants their roles with scripts/grant-access.ps1 -DeploymentName <deployment>, which scripts/deploy.ps1 names when it stops for them. To check the roles of a later deployment, run the same command with -WhatIf."
     }
 }
 

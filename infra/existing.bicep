@@ -207,6 +207,23 @@ param registryPrivateEndpointsEnabled bool = true
 @description('Public network access of a new registry. scripts/deploy.ps1 enables it only while it builds the image.')
 param acrPublicNetworkAccess string = 'Disabled'
 
+// The job identities and their role assignments. Unlike the other services, identities default to new, as in earlier versions.
+@allowed([
+  'new'
+  'existing'
+])
+@description('new creates one user-assigned identity per job. existing reuses primaryIdentityId and secondaryIdentityId, for example identities that a platform team manages.')
+param identityMode string = 'new'
+
+@description('Resource ID of an existing user-assigned identity in the deployment subscription for the primary job. Required when identityMode is existing.')
+param primaryIdentityId string = ''
+
+@description('Resource ID of an existing user-assigned identity in the deployment subscription for the secondary job. Required when identityMode is existing.')
+param secondaryIdentityId string = ''
+
+@description('Assigns the job identities their roles on the storage accounts and the registry, which needs the right to create role assignments there. Set to false when an administrator grants the roles instead, with scripts/grant-access.ps1.')
+param createRoleAssignments bool = true
+
 @sealed()
 type resourceNamesType = {
   primaryIdentity: string?
@@ -280,6 +297,11 @@ var secondaryEndpoints = {
 var primaryCreatesEndpoints = primaryEndpoints.primaryStorage || primaryEndpoints.secondaryStorage || primaryEndpoints.registry
 var secondaryCreatesEndpoints = secondaryEndpoints.primaryStorage || secondaryEndpoints.secondaryStorage || secondaryEndpoints.registry
 
+var identityIdPrefix = toLower('/subscriptions/${subscription().subscriptionId}/resourceGroups/')
+var identityIdType = '/providers/microsoft.managedidentity/userassignedidentities/'
+var primaryIdentityIdValid = length(split(primaryIdentityId, '/')) == 9 && startsWith(toLower(primaryIdentityId), identityIdPrefix) && contains(toLower(primaryIdentityId), identityIdType)
+var secondaryIdentityIdValid = length(split(secondaryIdentityId, '/')) == 9 && startsWith(toLower(secondaryIdentityId), identityIdPrefix) && contains(toLower(secondaryIdentityId), identityIdType)
+
 // Missing inputs stop the deployment during validation, before any resource changes.
 var inputErrors = filter([
   primaryStorageMode == 'existing' && (empty(primaryStorageAccountName) || empty(primaryStorageResourceGroupName) || empty(primaryFileShareName)) ? 'primaryStorageMode is existing, so set primaryStorageAccountName, primaryStorageResourceGroupName, and primaryFileShareName.' : ''
@@ -296,6 +318,9 @@ var inputErrors = filter([
   registryMode == 'new' && !registryPrivateEndpointsEnabled ? 'A new registry denies public network access, so registryPrivateEndpointsEnabled must be true.' : ''
   primaryNetworkIsNew && secondaryNetworkIsNew && toLower(primaryDnsResourceGroupName) == toLower(secondaryDnsResourceGroupName) ? 'Both VNets are new and their private DNS zones have the same names, so primaryDnsResourceGroupName and secondaryDnsResourceGroupName must differ.' : ''
   toLower(primaryRegionCode) == toLower(secondaryRegionCode) ? 'primaryRegionCode and secondaryRegionCode must differ because they distinguish the regional resource names.' : ''
+  identityMode == 'existing' && (empty(primaryIdentityId) || empty(secondaryIdentityId)) ? 'identityMode is existing, so set primaryIdentityId and secondaryIdentityId.' : ''
+  identityMode == 'existing' && !empty(primaryIdentityId) && !primaryIdentityIdValid ? 'primaryIdentityId must be the resource ID of a user-assigned managed identity in the deployment subscription.' : ''
+  identityMode == 'existing' && !empty(secondaryIdentityId) && !secondaryIdentityIdValid ? 'secondaryIdentityId must be the resource ID of a user-assigned managed identity in the deployment subscription.' : ''
 ], inputError => !empty(inputError))
 var validatedTags = empty(inputErrors) ? tags : fail(join(inputErrors, ' '))
 
@@ -588,6 +613,7 @@ module primaryIdentity 'modules/replication-identity.bicep' = {
     location: primaryLocation
     regionCode: primaryRegionCode
     name: resourceNames.?primaryIdentity ?? ''
+    existingIdentityId: identityMode == 'existing' ? primaryIdentityId : ''
     tags: validatedTags
   }
   dependsOn: [createdResourceGroups]
@@ -601,38 +627,54 @@ module secondaryIdentity 'modules/replication-identity.bicep' = {
     location: secondaryLocation
     regionCode: secondaryRegionCode
     name: resourceNames.?secondaryIdentity ?? ''
+    existingIdentityId: identityMode == 'existing' ? secondaryIdentityId : ''
     tags: validatedTags
   }
   dependsOn: [createdResourceGroups]
 }
 
-// Both identities need both accounts because either region can become the replication source.
-module primaryStorageRbac 'modules/existing-storage-rbac.bicep' = {
+// Both identities need both accounts because either region can become the replication source. union() removes a
+// duplicate when both jobs reuse one identity.
+var jobPrincipalIds = union([primaryIdentity.outputs.principalId], [secondaryIdentity.outputs.principalId])
+
+module primaryStorageRbac 'modules/existing-storage-rbac.bicep' = if (createRoleAssignments) {
   name: 'replication-primary-storage-rbac'
   scope: resourceGroup(empty(primaryStorageGroup) ? resourceGroupName : primaryStorageGroup)
   params: {
     storageAccountName: primaryStorageMode == 'new' ? newPrimaryStorage!.outputs.name : primaryStorageName
-    principalIds: [primaryIdentity.outputs.principalId, secondaryIdentity.outputs.principalId]
+    principalIds: jobPrincipalIds
   }
 }
 
-module secondaryStorageRbac 'modules/existing-storage-rbac.bicep' = {
+module secondaryStorageRbac 'modules/existing-storage-rbac.bicep' = if (createRoleAssignments) {
   name: 'replication-secondary-storage-rbac'
   scope: resourceGroup(empty(secondaryStorageGroup) ? resourceGroupName : secondaryStorageGroup)
   params: {
     storageAccountName: secondaryStorageMode == 'new' ? newSecondaryStorage!.outputs.name : secondaryStorageName
-    principalIds: [primaryIdentity.outputs.principalId, secondaryIdentity.outputs.principalId]
+    principalIds: jobPrincipalIds
   }
 }
 
-module registryRbac 'modules/existing-acr-rbac.bicep' = {
+module registryRbac 'modules/existing-acr-rbac.bicep' = if (createRoleAssignments) {
   name: 'replication-registry-rbac'
   scope: resourceGroup(empty(registryGroup) ? resourceGroupName : registryGroup)
   params: {
     registryName: registryMode == 'new' ? newRegistry!.outputs.name : registryResolvedName
-    principalIds: [primaryIdentity.outputs.principalId, secondaryIdentity.outputs.principalId]
+    principalIds: jobPrincipalIds
   }
 }
+
+// Every role assignment the jobs need, with the names the modules above give them. Outputs list them in both modes,
+// so scripts/deploy.ps1 can check them and scripts/grant-access.ps1 can create them when this deployment doesn't.
+var jobRoleTargets = [
+  { scope: primaryStorageId, roleDefinitionId: '69566ab7-960f-475b-8e7c-b3118f30c6bd', roleName: 'Storage File Data Privileged Contributor' }
+  { scope: secondaryStorageId, roleDefinitionId: '69566ab7-960f-475b-8e7c-b3118f30c6bd', roleName: 'Storage File Data Privileged Contributor' }
+  { scope: registryId, roleDefinitionId: '7f951dda-4ed3-4680-a7ca-43fe172d538d', roleName: 'AcrPull' }
+]
+var jobIdentities = [
+  { principalId: primaryIdentity.outputs.principalId, name: primaryIdentity.outputs.name }
+  { principalId: secondaryIdentity.outputs.principalId, name: secondaryIdentity.outputs.name }
+]
 
 var primaryFileUrl = 'https://${primaryStorageName}.file.${environment().suffixes.storage}/${primaryShareName}'
 var secondaryFileUrl = 'https://${secondaryStorageName}.file.${environment().suffixes.storage}/${secondaryShareName}'
@@ -744,3 +786,13 @@ output primaryFailureAlertId string = monitoring.outputs.primaryFailureAlertId
 output secondaryFailureAlertId string = monitoring.outputs.secondaryFailureAlertId
 output primaryFreshnessAlertId string = monitoring.outputs.primaryFreshnessAlertId
 output secondaryFreshnessAlertId string = monitoring.outputs.secondaryFreshnessAlertId
+output createRoleAssignments bool = createRoleAssignments
+output registryCreated bool = registryMode == 'new'
+output jobRoleAssignments array = [for index in range(0, 6): {
+  name: guid(jobRoleTargets[index / 2].scope, jobIdentities[index % 2].principalId, subscriptionResourceId('Microsoft.Authorization/roleDefinitions', jobRoleTargets[index / 2].roleDefinitionId))
+  scope: jobRoleTargets[index / 2].scope
+  principalId: jobIdentities[index % 2].principalId
+  principalName: jobIdentities[index % 2].name
+  roleDefinitionId: jobRoleTargets[index / 2].roleDefinitionId
+  roleName: jobRoleTargets[index / 2].roleName
+}]
