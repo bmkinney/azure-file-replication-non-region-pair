@@ -120,6 +120,15 @@ Assert-True ($permissionRows[0].Detail -like '*Privileged Identity Management*')
 $fakeAzRules = @((New-Rule 'rest --method get --url */providers/Microsoft.Authorization/permissions *' 'ERROR: (AuthorizationFailed) The client does not have authorization.' 1)) + $commonRules + $greenfieldRules
 $report = Invoke-Inventory (Join-Path $repositoryRoot 'infra/main.bicepparam')
 Assert-True ((Get-PermissionRows $report | ForEach-Object Status) -contains 'Not verified') 'a failed permissions lookup was not reported as not verified'
+
+# With createRoleAssignments = false, a Contributor-level identity can deploy; an administrator grants the roles afterward.
+$fakeAzRules = @((New-Rule 'rest --method get --url */providers/Microsoft.Authorization/permissions *' @{ value = @($contributorPermissions) })) + $commonRules + $greenfieldRules
+$report = Invoke-Inventory (Join-Path $repositoryRoot 'infra/main.bicepparam') @('createRoleAssignments=false')
+$permissionRows = Get-PermissionRows $report
+Assert-True ($permissionRows.Count -eq 2 -and (Get-Status $report 'Role assignments') -contains 'Ready' -and (Get-Status $report 'Job identity roles') -contains 'To be created') "separately granted roles were not reported: $($permissionRows | ConvertTo-Json -Compress)"
+Assert-True (@($permissionRows | Where-Object Item -eq 'Job identity roles')[0].Detail -like '*grant-access.ps1 -DeploymentName*') 'the grant step was not named'
+Assert-True (@($global:InventoryAzCalls | Where-Object { $_ -like 'rest --method get --url */providers/Microsoft.Authorization/permissions *' }).Count -eq 0) 'role assignment rights were checked although the deployment creates no role assignments'
+Assert-True ($report.Summary.PrerequisitesActionRequired -eq 0) 'a deploying identity without role assignment rights was flagged'
 $fakeAzRules = $commonRules + $greenfieldRules
 
 # Overrides reach what-if as extra --parameters values; names the template doesn't declare are dropped.
@@ -246,6 +255,42 @@ try {
     $registryRow = @(Get-PermissionRows $report | Where-Object Item -eq 'Role assignments on registry acrtest')
     Assert-True ($registryRow.Count -eq 1 -and $registryRow[0].Status -eq 'Action required' -and $registryRow[0].Detail -like '*assigns AcrPull*') "missing registry role assignment rights were not flagged: $($registryRow | ConvertTo-Json -Compress)"
     Assert-True ($report.Summary.PrerequisitesActionRequired -eq 1) "unexpected action items with missing registry rights: $(@($report.Prerequisites | Where-Object Status -eq 'Action required' | ForEach-Object Item) -join '; ')"
+
+    # Reused identities with separately granted roles: the deploying identity needs no role assignment rights, but it must
+    # be able to assign the identities, and the identities' roles on the existing services are checked.
+    $identityRoot = "$subscription/resourceGroups/rg-identities/providers/Microsoft.ManagedIdentity/userAssignedIdentities"
+    $separatedOverrides = @('createRoleAssignments=false', 'identityMode=existing', "primaryIdentityId=$identityRoot/id-replication-pri", "secondaryIdentityId=$identityRoot/id-replication-sec")
+    $fileRole = "$subscription/providers/Microsoft.Authorization/roleDefinitions/69566ab7-960f-475b-8e7c-b3118f30c6bd"
+    $pullRole = "$subscription/providers/Microsoft.Authorization/roleDefinitions/7f951dda-4ed3-4680-a7ca-43fe172d538d"
+    $identityRules = @(
+        (New-Rule "identity show --ids $identityRoot/id-replication-pri *" @{ name = 'id-replication-pri'; principalId = '22222222-2222-2222-2222-222222222222' }),
+        (New-Rule "identity show --ids $identityRoot/id-replication-sec *" @{ name = 'id-replication-sec'; principalId = '33333333-3333-3333-3333-333333333333' }),
+        (New-Rule 'role assignment list --scope */storageAccounts/* *' @($fileRole)),
+        (New-Rule 'role assignment list --scope */registries/acrtest --assignee-object-id 2222* *' @()),
+        (New-Rule 'role assignment list --scope */registries/acrtest --assignee-object-id 3333* *' @($pullRole))
+    )
+    $fakeAzRules = $identityRules + $commonRules + (Get-ExistingRules -PrimaryEndpoints @('pe-primary-file-a', 'pe-primary-file-b') -SecondaryEndpoints @('pe-secondary-file-a', 'pe-secondary-file-b'))
+    $report = Invoke-Inventory $parametersFile $separatedOverrides
+    Assert-True ((Get-Status $report 'primary job identity id-replication-pri') -contains 'Ready') 'a reused identity that the deploying identity can assign was not accepted'
+    Assert-True ((Get-Status $report 'Role assignments') -contains 'Ready') 'separately granted roles were not explained'
+    Assert-True ((Get-Status $report 'Job identity roles on primary storage account stprimarytest') -contains 'Ready') 'granted storage roles were not accepted'
+    $registryRow = @($report.Prerequisites | Where-Object Item -eq 'Job identity roles on registry acrtest')
+    Assert-True ($registryRow.Count -eq 1 -and $registryRow[0].Status -eq 'Action required' -and $registryRow[0].Detail -like '*id-replication-pri lacks AcrPull*') "a missing AcrPull grant was not flagged: $($registryRow | ConvertTo-Json -Compress)"
+    Assert-True ($registryRow[0].Detail -like "*grant-access.ps1 -IdentityId $identityRoot/id-replication-pri,$identityRoot/id-replication-sec -StorageAccountId *stprimarytest,*stsecondarytest -RegistryId */registries/acrtest") "the grant command is incomplete: $($registryRow[0].Detail)"
+    Assert-True (@($report.Prerequisites | Where-Object Item -like 'Role assignments on *').Count -eq 0) 'role assignment rights were checked although the deployment creates no role assignments'
+    Assert-True (@($global:InventoryAzCalls | Where-Object { $_ -like 'rest --method get --url */storageAccounts/*/providers/Microsoft.Authorization/permissions *' }).Count -eq 0) 'the permissions API was read for the storage accounts'
+    Assert-True ($report.Summary.PrerequisitesActionRequired -eq 1) "unexpected action items with separately granted roles: $(@($report.Prerequisites | Where-Object Status -eq 'Action required' | ForEach-Object Item) -join '; ')"
+
+    # Attaching a reused identity to a job needs Microsoft.ManagedIdentity/userAssignedIdentities/assign/action, which
+    # Managed Identity Operator grants as userAssignedIdentities/*/assign/action.
+    $identityOperatorPermissions = @{ actions = @('Microsoft.ManagedIdentity/userAssignedIdentities/*/read', 'Microsoft.ManagedIdentity/userAssignedIdentities/*/assign/action', 'Microsoft.Authorization/*/read', 'Microsoft.Insights/alertRules/*', 'Microsoft.Resources/subscriptions/resourceGroups/read', 'Microsoft.Resources/deployments/*', 'Microsoft.Support/*'); notActions = @() }
+    $operatorRule = New-Rule 'rest --method get --url */userAssignedIdentities/id-replication-pri/providers/Microsoft.Authorization/permissions *' @{ value = @($identityOperatorPermissions) }
+    $readerRule = New-Rule 'rest --method get --url */userAssignedIdentities/id-replication-sec/providers/Microsoft.Authorization/permissions *' @{ value = @(@{ actions = @('*/read'); notActions = @() }) }
+    $fakeAzRules = @($operatorRule, $readerRule) + $identityRules + $commonRules + (Get-ExistingRules -PrimaryEndpoints @('pe-primary-file-a', 'pe-primary-file-b') -SecondaryEndpoints @('pe-secondary-file-a', 'pe-secondary-file-b'))
+    $report = Invoke-Inventory $parametersFile $separatedOverrides
+    Assert-True ((Get-Status $report 'primary job identity id-replication-pri') -contains 'Ready') 'Managed Identity Operator was not accepted for attaching a reused identity'
+    $identityRow = @($report.Prerequisites | Where-Object Item -eq 'secondary job identity id-replication-sec')
+    Assert-True ($identityRow.Count -eq 1 -and $identityRow[0].Status -eq 'Action required' -and $identityRow[0].Detail -like '*Managed Identity Operator*') "a reused identity that can't be assigned was not flagged: $($identityRow | ConvertTo-Json -Compress)"
 
     $fakeAzRules = $commonRules + (Get-ExistingRules -PrimaryEndpoints @('pe-primary-file-a') -SecondaryEndpoints @('pe-secondary-file-b'))
     $report = Invoke-Inventory $parametersFile

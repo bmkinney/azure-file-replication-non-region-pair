@@ -972,6 +972,14 @@ if ($ParametersOutputPath) {
     }
 
     $lines.Add('')
+    $lines.Add('// Job identities and their roles. With createRoleAssignments = true, the deploying identity needs the right to create role')
+    $lines.Add('// assignments on the storage accounts and the registry. Set it to false when it lacks that right, for example a pipeline')
+    $lines.Add('// identity; an administrator then grants the roles once with scripts/grant-access.ps1.')
+    Add-Param 'createRoleAssignments' $true
+    $lines.Add("// To reuse user-assigned identities that already exist, for example identities that a platform team manages, add")
+    $lines.Add("// identityMode = 'existing' and the identities' resource IDs as primaryIdentityId and secondaryIdentityId.")
+
+    $lines.Add('')
     $lines.Add('// Optional names for the other resources the deployment creates. Uncomment and set the names you need; empty or omitted names are generated.')
     $lines.Add('// param resourceNames = {')
     foreach ($key in 'primaryIdentity', 'secondaryIdentity', 'primaryLogWorkspace', 'secondaryLogWorkspace', 'primaryEnvironment', 'secondaryEnvironment', 'primaryJob', 'secondaryJob',
