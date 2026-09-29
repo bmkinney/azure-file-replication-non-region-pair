@@ -93,7 +93,19 @@ param registryResourceGroupName = '<registry-resource-group>'
 // scripts/deploy.ps1 builds and pins the AzCopy image. For a direct deployment, set an image that is in the registry:
 // param containerImage = '<registry-name>.azurecr.io/azure-files-dr-azcopy@sha256:<digest>'
 
-// 6. Optional names for the other resources that the deployment creates; omitted names are generated. Valid keys:
+// 6. Job identities and their roles. With createRoleAssignments = true, the deploying identity needs the right to create
+// role assignments on both storage accounts and the registry, for example Owner. Set it to false when the deploying
+// identity lacks that right, such as a pipeline identity with Contributor access. An administrator then grants the roles
+// once with scripts/grant-access.ps1, and scripts/deploy.ps1 waits for them before it activates the schedule.
+param createRoleAssignments = true
+// new creates one user-assigned identity per job. To reuse identities that already exist, for example ones that a
+// platform team manages, set existing and their resource IDs. With createRoleAssignments = false, an administrator can then
+// grant their roles before the first deployment.
+// param identityMode = 'existing'
+// param primaryIdentityId = '/subscriptions/<subscription-id>/resourceGroups/<identity-resource-group>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<primary-identity>'
+// param secondaryIdentityId = '/subscriptions/<subscription-id>/resourceGroups/<identity-resource-group>/providers/Microsoft.ManagedIdentity/userAssignedIdentities/<secondary-identity>'
+
+// 7. Optional names for the other resources that the deployment creates; omitted names are generated. Valid keys:
 // primaryIdentity, secondaryIdentity, primaryLogWorkspace, secondaryLogWorkspace, primaryEnvironment,
 // secondaryEnvironment, primaryJob, secondaryJob, primaryVnetPrimaryStorageEndpoint, primaryVnetSecondaryStorageEndpoint,
 // primaryVnetRegistryEndpoint, secondaryVnetPrimaryStorageEndpoint, secondaryVnetSecondaryStorageEndpoint,
@@ -104,7 +116,7 @@ param registryResourceGroupName = '<registry-resource-group>'
 //   secondaryJob: '<secondary-job-name>'
 // }
 
-// 7. Schedule and alerts. Keep activeRegion = 'none' until the jobs pass validation, then set 'primary'.
+// 8. Schedule and alerts. Keep activeRegion = 'none' until the jobs pass validation, then set 'primary'.
 param activeRegion = 'none'
 param scheduleCronExpression = '*/10 * * * *'
 param alertEmailAddresses = [

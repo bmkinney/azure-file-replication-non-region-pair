@@ -21,6 +21,27 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function Get-RoleAssignmentHint([string]$ErrorText) {
+    # The switch redeploys the template, including the job identities' role assignments on the storage accounts and registry.
+    $flatText = [regex]::Replace($ErrorText, '\s*\r?\n[ \t]*(\|[ \t]?)?', ' ')
+    $scopes = @([regex]::Matches($flatText, "roleAssignments/write'\s+at\s+scope\s+'(?<scope>[^'\s]+?)/providers/Microsoft\.Authorization/roleAssignments/") |
+        ForEach-Object { $_.Groups['scope'].Value } | Sort-Object -Unique)
+    if ($scopes.Count -eq 0) {
+        return ''
+    }
+    $scopeList = ($scopes | ForEach-Object { "  $_" }) -join "`n"
+    return "`n`nThe signed-in identity isn't allowed to create role assignments at:`n$scopeList`nThe switch redeploys the job identities' AcrPull and Storage File Data Privileged Contributor assignments, and the jobs deploy only after them, so the replication direction didn't change. Grant Role Based Access Control Administrator, which can be limited to those two roles, or User Access Administrator or Owner, at these scopes or above, or activate the role if it's eligible through Privileged Identity Management. After a few minutes, rerun this script. Alternatively, set createRoleAssignments = false in the parameter file, so that deployments and switches don't create role assignments; the job identities keep the roles that they already have. See 'RBAC requirements' in the README."
+}
+
+function Get-OutputValue($Deployment, [string]$Name) {
+    # Deployments of earlier template versions lack newer outputs.
+    $output = $Deployment.properties.outputs.PSObject.Properties[$Name]
+    if ($output) {
+        return $output.Value.value
+    }
+    return $null
+}
+
 function Invoke-AzCli {
     param([Parameter(Mandatory)][string[]]$Arguments)
 
@@ -38,7 +59,7 @@ function Invoke-AzCli {
     }
 
     if ($exitCode -ne 0) {
-        throw "az $($Arguments -join ' ') failed:`n$errorOutput`n$($output -join [Environment]::NewLine)"
+        throw "az $($Arguments -join ' ') failed:`n$errorOutput`n$($output -join [Environment]::NewLine)$(Get-RoleAssignmentHint $errorOutput)"
     }
     return ($output -join [Environment]::NewLine)
 }
@@ -109,9 +130,10 @@ if (-not $PSCmdlet.ShouldProcess($jobGroups -join ', ', "Set '$ActiveRegion' as 
 
 # acrPublicNetworkAccess applies only to a registry the templates create.
 $deploymentOverrides = @("containerImage=$($images[0])", "activeRegion=$ActiveRegion", 'acrPublicNetworkAccess=Disabled')
+$deploymentName = "azure-files-dr-switch-$(Get-Date -Format 'yyyyMMddHHmmss')"
 $deploymentArguments = @(
     'deployment', 'sub', 'create',
-    '--name', "azure-files-dr-switch-$(Get-Date -Format 'yyyyMMddHHmmss')",
+    '--name', $deploymentName,
     '--location', $Location,
     '--parameters', $ParametersFile,
     '--parameters'
@@ -128,3 +150,18 @@ $activeJob = if ($ActiveRegion -eq 'primary') {
 
 Write-Host "Replication direction switched. Active scheduled job: $activeJob"
 Write-Host 'Application writes remain fenced until validation is complete.'
+
+# When an administrator grants the job identities' roles, the switch neither needs nor changes them. A missing one
+# fails the new direction's executions, so report it without undoing the switch.
+if ((Get-OutputValue $deployment 'createRoleAssignments') -eq $false) {
+    $grantCommand = "pwsh ./scripts/grant-access.ps1 -DeploymentName $deploymentName"
+    try {
+        $missing = @(& (Join-Path $PSScriptRoot 'grant-access.ps1') -DeploymentName $deploymentName -WhatIf -PassThru 6> $null | Where-Object Status -ne 'Exists')
+        if ($missing.Count -gt 0) {
+            $list = ($missing | ForEach-Object { "  $($_.Status): $($_.RoleName) for $($_.PrincipalName) on $($_.Scope)" }) -join "`n"
+            Write-Warning "The job identities are missing role assignments, so replication in the new direction fails until an administrator runs '$grantCommand':`n$list"
+        }
+    } catch {
+        Write-Warning "Could not check the job identities' role assignments. Check them with '$grantCommand -WhatIf'. $($_.Exception.Message)"
+    }
+}

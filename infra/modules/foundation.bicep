@@ -9,6 +9,10 @@ param activeRegion string
 param containerImage string
 param acrPublicNetworkAccess string
 param scheduleCronExpression string
+
+@description('False leaves the job identities\' role assignments to an administrator, who grants them with scripts/grant-access.ps1.')
+param createRoleAssignments bool
+
 param tags object
 
 var primaryToken = uniqueString(subscription().id, resourceGroup().id, environmentName, primaryLocation)
@@ -428,7 +432,7 @@ resource secondaryIdentity 'Microsoft.ManagedIdentity/userAssignedIdentities@202
   tags: tags
 }
 
-resource primaryIdentityPrimaryFileRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource primaryIdentityPrimaryFileRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (createRoleAssignments) {
   name: guid(primaryFileStorage.id, primaryIdentity.id, fileDataRoleDefinitionId)
   scope: primaryFileStorage
   properties: {
@@ -438,7 +442,7 @@ resource primaryIdentityPrimaryFileRole 'Microsoft.Authorization/roleAssignments
   }
 }
 
-resource primaryIdentitySecondaryFileRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource primaryIdentitySecondaryFileRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (createRoleAssignments) {
   name: guid(secondaryFileStorage.id, primaryIdentity.id, fileDataRoleDefinitionId)
   scope: secondaryFileStorage
   properties: {
@@ -448,7 +452,7 @@ resource primaryIdentitySecondaryFileRole 'Microsoft.Authorization/roleAssignmen
   }
 }
 
-resource secondaryIdentityPrimaryFileRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource secondaryIdentityPrimaryFileRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (createRoleAssignments) {
   name: guid(primaryFileStorage.id, secondaryIdentity.id, fileDataRoleDefinitionId)
   scope: primaryFileStorage
   properties: {
@@ -458,7 +462,7 @@ resource secondaryIdentityPrimaryFileRole 'Microsoft.Authorization/roleAssignmen
   }
 }
 
-resource secondaryIdentitySecondaryFileRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource secondaryIdentitySecondaryFileRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (createRoleAssignments) {
   name: guid(secondaryFileStorage.id, secondaryIdentity.id, fileDataRoleDefinitionId)
   scope: secondaryFileStorage
   properties: {
@@ -468,7 +472,7 @@ resource secondaryIdentitySecondaryFileRole 'Microsoft.Authorization/roleAssignm
   }
 }
 
-resource primaryAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource primaryAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (createRoleAssignments) {
   name: guid(registry.id, primaryIdentity.id, acrPullRoleDefinitionId)
   scope: registry
   properties: {
@@ -478,7 +482,7 @@ resource primaryAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 
-resource secondaryAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource secondaryAcrPull 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (createRoleAssignments) {
   name: guid(registry.id, secondaryIdentity.id, acrPullRoleDefinitionId)
   scope: registry
   properties: {
@@ -700,3 +704,22 @@ output primaryFileStorageAccountName string = primaryFileStorage.name
 output secondaryFileStorageAccountName string = secondaryFileStorage.name
 output primaryFileShareName string = primaryShare.name
 output secondaryFileShareName string = secondaryShare.name
+
+// Every role assignment the jobs need, with the names the resources above give them, whether or not this deployment creates them.
+var jobRoleTargets = [
+  { scope: primaryFileStorage.id, roleDefinitionId: '69566ab7-960f-475b-8e7c-b3118f30c6bd', roleName: 'Storage File Data Privileged Contributor' }
+  { scope: secondaryFileStorage.id, roleDefinitionId: '69566ab7-960f-475b-8e7c-b3118f30c6bd', roleName: 'Storage File Data Privileged Contributor' }
+  { scope: registry.id, roleDefinitionId: '7f951dda-4ed3-4680-a7ca-43fe172d538d', roleName: 'AcrPull' }
+]
+var jobIdentities = [
+  { id: primaryIdentity.id, name: primaryIdentity.name, principalId: primaryIdentity.properties.principalId }
+  { id: secondaryIdentity.id, name: secondaryIdentity.name, principalId: secondaryIdentity.properties.principalId }
+]
+output jobRoleAssignments array = [for index in range(0, 6): {
+  name: guid(jobRoleTargets[index / 2].scope, jobIdentities[index % 2].id, subscriptionResourceId('Microsoft.Authorization/roleDefinitions', jobRoleTargets[index / 2].roleDefinitionId))
+  scope: jobRoleTargets[index / 2].scope
+  principalId: jobIdentities[index % 2].principalId
+  principalName: jobIdentities[index % 2].name
+  roleDefinitionId: jobRoleTargets[index / 2].roleDefinitionId
+  roleName: jobRoleTargets[index / 2].roleName
+}]

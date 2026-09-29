@@ -256,7 +256,7 @@ try {
         "param secondaryVnetName = ''", "param secondaryVnetResourceGroupName = ''", "param secondaryPrivateEndpointSubnetName = ''",
         "param secondaryDnsResourceGroupName = 'rg-azure-files-replication-sec-dns'",
         '// param resourceNames = {', "//   primaryJob: ''", "//   secondaryFreshnessAlert: ''",
-        'param existingResourceGroups = []'
+        'param existingResourceGroups = []', 'param createRoleAssignments = true', "// identityMode = 'existing'"
     ) 'the reuse parameter file'
     Assert-True (-not $generated.Contains('param secondaryResourceGroupName')) 'a single resource group layout wrote a secondary resource group'
 
