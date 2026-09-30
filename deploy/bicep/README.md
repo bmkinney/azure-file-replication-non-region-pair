@@ -810,7 +810,7 @@ Set `containerImage` in the parameter file to `<registry-name>.azurecr.io/azure-
 
 If `registryMode` is `new`, the registry doesn't exist until the first deployment. Either let `scripts/deploy.ps1` build the image, or create the registry with public access for the build: add `--parameters acrPublicNetworkAccess=Enabled` to the stage 1 deployment below, build and read the digest as above, and keep `acrPublicNetworkAccess=Disabled`, the default, for every later deployment.
 
-`az acr build` pulls the `ubuntu:24.04` base image from Docker Hub, which rate-limits anonymous pulls. If a build fails with `toomanyrequests`, see [Image build and registry problems](../../README.md#image-build-and-registry-problems).
+`az acr build` pulls the `ubuntu:26.04` base image from Docker Hub, which rate-limits anonymous pulls. If a build fails with `toomanyrequests`, see [Image build and registry problems](../../README.md#image-build-and-registry-problems).
 
 ### Deploy in stages
 
