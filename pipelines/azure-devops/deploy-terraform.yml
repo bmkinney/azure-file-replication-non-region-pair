@@ -1,0 +1,125 @@
+# Manually run Terraform operation. Never triggered by commits or pull requests.
+trigger: none
+pr: none
+
+parameters:
+  - name: operation
+    displayName: Operation
+    type: string
+    default: preview
+    values:
+      - preview
+      - deploy
+      - switch-direction
+  - name: activeRegion
+    displayName: Region to activate for switch-direction
+    type: string
+    default: primary
+    values:
+      - primary
+      - secondary
+  - name: writesFenced
+    displayName: Application writes are fenced (required for switch-direction)
+    type: boolean
+    default: false
+  - name: environment
+    displayName: Azure DevOps environment (approvals and checks)
+    type: string
+    default: production
+
+# Pipeline variables to define (for example in a variable group):
+#   serviceConnection - name of the Azure Resource Manager service connection that uses workload identity federation
+#   serviceConnectionId - ID of that service connection, for Terraform's Azure DevOps OIDC sign-in
+#   tfvarsSecureFile - secure file name of the complete .tfvars file
+#   tfStateResourceGroup, tfStateStorageAccount, tfStateContainer, tfStateKey - azurerm backend settings
+
+variables:
+  terraformVersion: 1.12.2
+
+jobs:
+  - deployment: terraform
+    displayName: Terraform ${{ parameters.operation }}
+    pool:
+      vmImage: ubuntu-latest
+    environment: ${{ parameters.environment }}
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - checkout: self
+              persistCredentials: false
+
+            - ${{ if and(eq(parameters.operation, 'switch-direction'), ne(parameters.writesFenced, true)) }}:
+                - pwsh: |
+                    Write-Host '##vso[task.logissue type=error]switch-direction requires writesFenced = true.'
+                    exit 1
+                  displayName: Require fenced writes
+
+            - task: DownloadSecureFile@1
+              name: tfvarsFile
+              displayName: Download variable file
+              inputs:
+                secureFile: $(tfvarsSecureFile)
+
+            - pwsh: |
+                $zip = Join-Path $env:AGENT_TEMPDIRECTORY 'terraform.zip'
+                $url = "https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip"
+                $sums = Invoke-RestMethod "https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_SHA256SUMS"
+                Invoke-WebRequest -Uri $url -OutFile $zip
+                $expected = ($sums -split "`n" | Where-Object { $_ -match "terraform_$(terraformVersion)_linux_amd64\.zip$" }).Split(' ')[0]
+                if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $expected) { throw 'Terraform checksum mismatch.' }
+                $bin = Join-Path $env:AGENT_TEMPDIRECTORY 'terraform-bin'
+                Expand-Archive $zip -DestinationPath $bin -Force
+                Write-Host "##vso[task.prependpath]$bin"
+                az extension add --name containerapp --upgrade --only-show-errors
+              displayName: Install tools
+
+            - pwsh: |
+                # Agent state is discarded after the job, so the pipeline always uses the azurerm backend.
+                Set-Content -LiteralPath 'deploy/terraform/backend_override.tf' -Value "terraform {`n  backend `"azurerm`" {}`n}"
+                @(
+                  'resource_group_name  = "$(tfStateResourceGroup)"'
+                  'storage_account_name = "$(tfStateStorageAccount)"'
+                  'container_name       = "$(tfStateContainer)"'
+                  'key                  = "$(tfStateKey)"'
+                  'use_azuread_auth     = true'
+                  'use_oidc             = true'
+                ) | Set-Content -LiteralPath 'deploy/terraform/backend.hcl'
+                Copy-Item -LiteralPath '$(tfvarsFile.secureFilePath)' -Destination 'deploy/terraform/pipeline.local.tfvars'
+              displayName: Write Terraform configuration
+
+            - task: AzureCLI@2
+              displayName: Run ${{ parameters.operation }}
+              env:
+                OPERATION: ${{ parameters.operation }}
+                ACTIVE_REGION: ${{ parameters.activeRegion }}
+                ARM_USE_OIDC: 'true'
+                ARM_ADO_PIPELINE_SERVICE_CONNECTION_ID: $(serviceConnectionId)
+                SYSTEM_ACCESSTOKEN: $(System.AccessToken)
+              inputs:
+                azureSubscription: $(serviceConnection)
+                scriptType: pscore
+                scriptLocation: inlineScript
+                addSpnToEnvironment: true
+                inlineScript: |
+                  $env:ARM_CLIENT_ID = $env:servicePrincipalId
+                  $env:ARM_TENANT_ID = $env:tenantId
+                  $env:ARM_SUBSCRIPTION_ID = az account show --query id --output tsv
+                  $directory = (Resolve-Path 'deploy/terraform').Path
+                  $common = @{
+                    TerraformDirectory = $directory
+                    VarFile            = Join-Path $directory 'pipeline.local.tfvars'
+                    BackendConfig      = Join-Path $directory 'backend.hcl'
+                  }
+                  switch ($env:OPERATION) {
+                    'preview' { & ./deploy/terraform/deploy.ps1 @common -ImageContext (Resolve-Path 'src/azcopy-job').Path -WhatIf }
+                    'deploy' { & ./deploy/terraform/deploy.ps1 @common -ImageContext (Resolve-Path 'src/azcopy-job').Path }
+                    'switch-direction' { & ./scripts/switch-direction.ps1 @common -ActiveRegion $env:ACTIVE_REGION -WritesFenced }
+                  }
+
+            - pwsh: |
+                foreach ($path in 'deploy/terraform/pipeline.local.tfvars', 'deploy/terraform/backend.hcl', 'deploy/terraform/backend_override.tf') {
+                  Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+                }
+              displayName: Clean up generated files
+              condition: always()

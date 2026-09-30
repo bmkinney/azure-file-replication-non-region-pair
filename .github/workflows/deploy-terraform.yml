@@ -1,0 +1,151 @@
+name: Deploy Terraform
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Operation to run.
+        required: true
+        default: preview
+        type: choice
+        options:
+          - preview
+          - deploy
+          - switch-direction
+      active_region:
+        description: Region to activate for switch-direction.
+        required: true
+        default: primary
+        type: choice
+        options:
+          - primary
+          - secondary
+      writes_fenced:
+        description: Confirm application writes are fenced before switch-direction.
+        required: true
+        default: false
+        type: boolean
+      environment:
+        description: GitHub environment that stores variables and secrets.
+        required: true
+        default: production
+        type: environment
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy-terraform:
+    name: Terraform ${{ inputs.operation }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    defaults:
+      run:
+        shell: pwsh
+    env:
+      ARM_USE_OIDC: 'true'
+      ARM_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+      ARM_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+      ARM_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+    steps:
+      - name: Check configuration
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          TF_STATE_RESOURCE_GROUP: ${{ vars.TF_STATE_RESOURCE_GROUP }}
+          TF_STATE_STORAGE_ACCOUNT: ${{ vars.TF_STATE_STORAGE_ACCOUNT }}
+          TF_STATE_CONTAINER: ${{ vars.TF_STATE_CONTAINER }}
+          TF_STATE_KEY: ${{ vars.TF_STATE_KEY }}
+          TERRAFORM_TFVARS: ${{ secrets.TERRAFORM_TFVARS }}
+          OPERATION: ${{ inputs.operation }}
+          WRITES_FENCED: ${{ inputs.writes_fenced }}
+        run: |
+          $required = 'AZURE_CLIENT_ID', 'AZURE_TENANT_ID', 'AZURE_SUBSCRIPTION_ID', 'TF_STATE_RESOURCE_GROUP', 'TF_STATE_STORAGE_ACCOUNT', 'TF_STATE_CONTAINER', 'TF_STATE_KEY', 'TERRAFORM_TFVARS'
+          $missing = @($required | Where-Object { [string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($_)) })
+          if ($env:OPERATION -eq 'switch-direction' -and $env:WRITES_FENCED -ne 'true') {
+            Write-Host '::error title=Writes must be fenced::switch-direction requires writes_fenced=true.'
+            exit 1
+          }
+          if ($missing.Count -gt 0) {
+            foreach ($name in $missing) {
+              Write-Host "::error title=Missing configuration::$name is required."
+            }
+            exit 1
+          }
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Azure login
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install Azure CLI tools
+        run: az extension add --name containerapp --upgrade --only-show-errors
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.12.2
+          terraform_wrapper: false
+
+      - name: Write Terraform configuration
+        env:
+          TERRAFORM_TFVARS: ${{ secrets.TERRAFORM_TFVARS }}
+          TF_STATE_RESOURCE_GROUP: ${{ vars.TF_STATE_RESOURCE_GROUP }}
+          TF_STATE_STORAGE_ACCOUNT: ${{ vars.TF_STATE_STORAGE_ACCOUNT }}
+          TF_STATE_CONTAINER: ${{ vars.TF_STATE_CONTAINER }}
+          TF_STATE_KEY: ${{ vars.TF_STATE_KEY }}
+        run: |
+          # Runner state is discarded after the job, so the pipeline always uses the azurerm backend.
+          Set-Content -LiteralPath 'deploy/terraform/backend_override.tf' -Value "terraform {`n  backend `"azurerm`" {}`n}"
+          @(
+            "resource_group_name  = `"$env:TF_STATE_RESOURCE_GROUP`""
+            "storage_account_name = `"$env:TF_STATE_STORAGE_ACCOUNT`""
+            "container_name       = `"$env:TF_STATE_CONTAINER`""
+            "key                  = `"$env:TF_STATE_KEY`""
+            'use_azuread_auth     = true'
+            'use_oidc             = true'
+          ) | Set-Content -LiteralPath 'deploy/terraform/backend.hcl'
+          Set-Content -LiteralPath 'deploy/terraform/pipeline.local.tfvars' -Value $env:TERRAFORM_TFVARS -NoNewline
+
+      - name: Run Terraform operation
+        env:
+          OPERATION: ${{ inputs.operation }}
+          ACTIVE_REGION: ${{ inputs.active_region }}
+        run: |
+          $directory = (Resolve-Path 'deploy/terraform').Path
+          $common = @{
+            TerraformDirectory = $directory
+            VarFile            = Join-Path $directory 'pipeline.local.tfvars'
+            BackendConfig      = Join-Path $directory 'backend.hcl'
+          }
+          switch ($env:OPERATION) {
+            'preview' {
+              & ./deploy/terraform/deploy.ps1 @common -ImageContext (Resolve-Path 'src/azcopy-job').Path -WhatIf
+            }
+            'deploy' {
+              & ./deploy/terraform/deploy.ps1 @common -ImageContext (Resolve-Path 'src/azcopy-job').Path
+            }
+            'switch-direction' {
+              & ./scripts/switch-direction.ps1 @common -ActiveRegion $env:ACTIVE_REGION -WritesFenced
+            }
+          }
+
+      - name: Cleanup generated files
+        if: always()
+        run: |
+          foreach ($path in 'deploy/terraform/pipeline.local.tfvars', 'deploy/terraform/backend.hcl', 'deploy/terraform/backend_override.tf') {
+            Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+          }

@@ -1,0 +1,104 @@
+# Manually run Bicep operation. Never triggered by commits or pull requests.
+trigger: none
+pr: none
+
+parameters:
+  - name: operation
+    displayName: Operation
+    type: string
+    default: preview
+    values:
+      - preview
+      - deploy
+      - switch-direction
+  - name: activeRegion
+    displayName: Region to activate for switch-direction
+    type: string
+    default: primary
+    values:
+      - primary
+      - secondary
+  - name: writesFenced
+    displayName: Application writes are fenced (required for switch-direction)
+    type: boolean
+    default: false
+  - name: environment
+    displayName: Azure DevOps environment (approvals and checks)
+    type: string
+    default: production
+
+# Pipeline variables to define (for example in a variable group):
+#   serviceConnection - Azure Resource Manager service connection that uses workload identity federation
+#   parametersSecureFile - secure file name of the complete .bicepparam file (starts with using './main.bicep' or './existing.bicep')
+#   location - optional deployment metadata region
+#   resourceGroupName, secondaryResourceGroupName - optional job resource groups for switch-direction
+
+jobs:
+  - deployment: bicep
+    displayName: Bicep ${{ parameters.operation }}
+    pool:
+      vmImage: ubuntu-latest
+    environment: ${{ parameters.environment }}
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - checkout: self
+              persistCredentials: false
+
+            - ${{ if and(eq(parameters.operation, 'switch-direction'), ne(parameters.writesFenced, true)) }}:
+                - pwsh: |
+                    Write-Host '##vso[task.logissue type=error]switch-direction requires writesFenced = true.'
+                    exit 1
+                  displayName: Require fenced writes
+
+            - task: DownloadSecureFile@1
+              name: parameters
+              displayName: Download parameter file
+              inputs:
+                secureFile: $(parametersSecureFile)
+
+            - pwsh: |
+                Copy-Item -LiteralPath '$(parameterFile.secureFilePath)' -Destination 'deploy/bicep/pipeline.local.bicepparam'
+                az extension add --name containerapp --upgrade --only-show-errors
+                az bicep install --only-show-errors
+              displayName: Prepare
+
+            - task: AzureCLI@2
+              displayName: Run ${{ parameters.operation }}
+              env:
+                OPERATION: ${{ parameters.operation }}
+                ACTIVE_REGION: ${{ parameters.activeRegion }}
+                AZURE_LOCATION: $(location)
+                RESOURCE_GROUP_NAME: $(resourceGroupName)
+                SECONDARY_RESOURCE_GROUP_NAME: $(secondaryResourceGroupName)
+              inputs:
+                azureSubscription: $(serviceConnection)
+                scriptType: pscore
+                scriptLocation: inlineScript
+                inlineScript: |
+                  $parametersFile = 'deploy/bicep/pipeline.local.bicepparam'
+                  $imageContext = (Resolve-Path 'src/azcopy-job').Path
+                  # Undefined pipeline variables arrive as their literal $(name) text.
+                  function Get-Setting([string]$Value) { if ($Value -and $Value -notmatch '^\$\(') { $Value } }
+                  $locationArgs = @()
+                  if (Get-Setting $env:AZURE_LOCATION) { $locationArgs = @('-Location', $env:AZURE_LOCATION) }
+                  switch ($env:OPERATION) {
+                    'preview' {
+                      & ./scripts/inventory.ps1 -ParametersFile $parametersFile @locationArgs
+                      & ./scripts/deploy.ps1 -ParametersFile $parametersFile -ImageContext $imageContext @locationArgs -WhatIf
+                    }
+                    'deploy' {
+                      & ./scripts/deploy.ps1 -ParametersFile $parametersFile -ImageContext $imageContext @locationArgs
+                    }
+                    'switch-direction' {
+                      $switchArgs = @('-ActiveRegion', $env:ACTIVE_REGION, '-WritesFenced', '-ParametersFile', $parametersFile) + $locationArgs
+                      if (Get-Setting $env:RESOURCE_GROUP_NAME) { $switchArgs += @('-ResourceGroupName', $env:RESOURCE_GROUP_NAME) }
+                      if (Get-Setting $env:SECONDARY_RESOURCE_GROUP_NAME) { $switchArgs += @('-SecondaryResourceGroupName', $env:SECONDARY_RESOURCE_GROUP_NAME) }
+                      & ./scripts/switch-direction.ps1 @switchArgs
+                    }
+                  }
+
+            - pwsh: Remove-Item -LiteralPath 'deploy/bicep/pipeline.local.bicepparam' -Force -ErrorAction SilentlyContinue
+              displayName: Clean up generated files
+              condition: always()

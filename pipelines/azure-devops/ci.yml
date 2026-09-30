@@ -1,0 +1,58 @@
+# Offline tests for Azure DevOps. Equivalent to .github/workflows/ci.yml; no Azure credentials are used.
+trigger:
+  branches:
+    include:
+      - main
+
+pr:
+  branches:
+    include:
+      - main
+
+variables:
+  terraformVersion: 1.12.2
+
+jobs:
+  - job: tests
+    displayName: Tests
+    pool:
+      vmImage: ubuntu-latest
+    steps:
+      - checkout: self
+        persistCredentials: false
+
+      - pwsh: |
+          $zip = Join-Path $env:AGENT_TEMPDIRECTORY 'terraform.zip'
+          $url = "https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_linux_amd64.zip"
+          $sums = Invoke-RestMethod "https://releases.hashicorp.com/terraform/$(terraformVersion)/terraform_$(terraformVersion)_SHA256SUMS"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          $expected = ($sums -split "`n" | Where-Object { $_ -match "terraform_$(terraformVersion)_linux_amd64\.zip$" }).Split(' ')[0]
+          if ((Get-FileHash $zip -Algorithm SHA256).Hash -ne $expected) { throw 'Terraform checksum mismatch.' }
+          $bin = Join-Path $env:AGENT_TEMPDIRECTORY 'terraform-bin'
+          Expand-Archive $zip -DestinationPath $bin -Force
+          Write-Host "##vso[task.prependpath]$bin"
+        displayName: Install Terraform
+
+      - pwsh: |
+          az bicep install
+          az bicep version
+        displayName: Install Bicep
+
+      - pwsh: |
+          $failed = @()
+          $tests = @(Get-ChildItem tests/test-*.ps1 | Sort-Object Name) + @(Get-Item src/azcopy-job/test-run-sync.ps1)
+          foreach ($test in $tests) {
+            Write-Host "##[group]$($test.Name)"
+            pwsh -NoProfile -File $test.FullName
+            $exitCode = $LASTEXITCODE
+            Write-Host '##[endgroup]'
+            if ($exitCode -ne 0) {
+              $failed += $test.Name
+              Write-Host "##vso[task.logissue type=error]$($test.Name) failed with exit code $exitCode."
+            }
+          }
+          if ($failed) { throw "Failed tests: $($failed -join ', ')" }
+        displayName: Run tests
+
+      - bash: shellcheck src/azcopy-job/run-sync.sh
+        displayName: ShellCheck
