@@ -229,7 +229,7 @@ function Invoke-Generation([string]$Name, [hashtable]$Arguments) {
     & $auditScript -ResourceGroupName $scopedGroups -PrimaryLocation westus2 -SecondaryLocation northcentralus -ParametersOutputPath $path @Arguments 6> $null 3> $null
     Assert-True (Test-Path -LiteralPath $path) "$Name was not written"
     & $realAz bicep build-params --file $path --stdout *> $null
-    Assert-True ($LASTEXITCODE -eq 0) "$Name does not compile against infra/existing.bicep"
+    Assert-True ($LASTEXITCODE -eq 0) "$Name does not compile against deploy/bicep/existing.bicep"
     return Get-Content -LiteralPath $path -Raw
 }
 

@@ -92,7 +92,7 @@ $greenfieldRules = @(
     ) })
 )
 $fakeAzRules = $commonRules + $greenfieldRules
-$report = Invoke-Inventory (Join-Path $repositoryRoot 'infra/main.bicepparam')
+$report = Invoke-Inventory (Join-Path $repositoryRoot 'deploy/bicep/main.bicepparam')
 Assert-True ($report.Profile -like 'greenfield*') 'main.bicepparam must be detected as the greenfield profile'
 Assert-True ($report.Summary.ResourcesToProvision -eq 3) "greenfield resources to provision were $($report.Summary.ResourcesToProvision)"
 Assert-True ((Get-Status $report 'Standard_ZRS in southcentralus') -contains 'Ready') 'ZRS availability was not reported as ready'
@@ -111,19 +111,19 @@ Assert-True (@($global:InventoryAzCalls | Where-Object { $_ -like "rest --method
 $fakeAzRules = @((New-Rule 'rest --method get --url */providers/Microsoft.Authorization/permissions *' @{ value = @($contributorPermissions) })) + $commonRules + $greenfieldRules + @(
     (New-Rule 'group show --name rg-azure-files-replication-demo *' @{ name = 'rg-azure-files-replication-demo' })
 )
-$report = Invoke-Inventory (Join-Path $repositoryRoot 'infra/main.bicepparam')
+$report = Invoke-Inventory (Join-Path $repositoryRoot 'deploy/bicep/main.bicepparam')
 $permissionRows = Get-PermissionRows $report
 Assert-True ($permissionRows.Count -eq 1 -and $permissionRows[0].Status -eq 'Action required' -and $permissionRows[0].Item -eq 'Role assignments on resource group rg-azure-files-replication-demo') "Contributor-only access was not flagged at the existing workload group: $($permissionRows | ConvertTo-Json -Compress)"
 Assert-True ($permissionRows[0].Detail -like '*Privileged Identity Management*') 'the permission finding does not mention eligible roles'
 
 # A failed permissions lookup is reported as not verified.
 $fakeAzRules = @((New-Rule 'rest --method get --url */providers/Microsoft.Authorization/permissions *' 'ERROR: (AuthorizationFailed) The client does not have authorization.' 1)) + $commonRules + $greenfieldRules
-$report = Invoke-Inventory (Join-Path $repositoryRoot 'infra/main.bicepparam')
+$report = Invoke-Inventory (Join-Path $repositoryRoot 'deploy/bicep/main.bicepparam')
 Assert-True ((Get-PermissionRows $report | ForEach-Object Status) -contains 'Not verified') 'a failed permissions lookup was not reported as not verified'
 
 # With createRoleAssignments = false, a Contributor-level identity can deploy; an administrator grants the roles afterward.
 $fakeAzRules = @((New-Rule 'rest --method get --url */providers/Microsoft.Authorization/permissions *' @{ value = @($contributorPermissions) })) + $commonRules + $greenfieldRules
-$report = Invoke-Inventory (Join-Path $repositoryRoot 'infra/main.bicepparam') @('createRoleAssignments=false')
+$report = Invoke-Inventory (Join-Path $repositoryRoot 'deploy/bicep/main.bicepparam') @('createRoleAssignments=false')
 $permissionRows = Get-PermissionRows $report
 Assert-True ($permissionRows.Count -eq 2 -and (Get-Status $report 'Role assignments') -contains 'Ready' -and (Get-Status $report 'Job identity roles') -contains 'To be created') "separately granted roles were not reported: $($permissionRows | ConvertTo-Json -Compress)"
 Assert-True (@($permissionRows | Where-Object Item -eq 'Job identity roles')[0].Detail -like '*grant-access.ps1 -DeploymentName*') 'the grant step was not named'
@@ -132,14 +132,14 @@ Assert-True ($report.Summary.PrerequisitesActionRequired -eq 0) 'a deploying ide
 $fakeAzRules = $commonRules + $greenfieldRules
 
 # Overrides reach what-if as extra --parameters values; names the template doesn't declare are dropped.
-$report = Invoke-Inventory (Join-Path $repositoryRoot 'infra/main.bicepparam') @('activeRegion=primary', 'acrPublicNetworkAccess=Disabled', 'notDeclared=1')
+$report = Invoke-Inventory (Join-Path $repositoryRoot 'deploy/bicep/main.bicepparam') @('activeRegion=primary', 'acrPublicNetworkAccess=Disabled', 'notDeclared=1')
 $whatIfCall = Get-WhatIfCall
 Assert-True ($whatIfCall -like '*--parameters activeRegion=primary acrPublicNetworkAccess=Disabled --result-format*') "what-if did not receive the overrides: $whatIfCall"
 Assert-True ($whatIfCall -notlike '*notDeclared*') 'an undeclared override was passed to what-if'
 Assert-True ((@($report.ParameterOverrides) -join ',') -eq 'activeRegion=primary,acrPublicNetworkAccess=Disabled') "report overrides were $(@($report.ParameterOverrides) -join ',')"
 $invalidOverrideRejected = $false
 try {
-    Invoke-Inventory (Join-Path $repositoryRoot 'infra/main.bicepparam') @('activeRegion') | Out-Null
+    Invoke-Inventory (Join-Path $repositoryRoot 'deploy/bicep/main.bicepparam') @('activeRegion') | Out-Null
 } catch {
     $invalidOverrideRejected = $_.Exception.Message -match 'name=value'
 }
@@ -147,7 +147,7 @@ Assert-True $invalidOverrideRejected 'an override without a value was accepted'
 
 # Existing resources: copy the templates so the test parameter file can reference them.
 $workRoot = Join-Path ([IO.Path]::GetTempPath()) "inventory-test-$([guid]::NewGuid().ToString('N'))"
-Copy-Item -Path (Join-Path $repositoryRoot 'infra') -Destination $workRoot -Recurse
+Copy-Item -Path (Join-Path $repositoryRoot 'deploy/bicep') -Destination $workRoot -Recurse
 $parametersFile = Join-Path $workRoot 'existing.test.bicepparam'
 $digest = 'a' * 64
 @"
