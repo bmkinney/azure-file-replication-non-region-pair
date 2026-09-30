@@ -10,8 +10,9 @@ resource "azurerm_container_registry" "this" {
   tags                          = var.tags
 
   georeplications {
-    location                = var.secondary_location
-    zone_redundancy_enabled = false
-    tags                    = var.tags
+    location                        = var.secondary_location
+    zone_redundancy_enabled         = false
+    global_endpoint_routing_enabled = true
+    tags                            = var.tags
   }
 }
