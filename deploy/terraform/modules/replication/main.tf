@@ -84,6 +84,7 @@ resource "azurerm_container_app_environment" "primary" {
   resource_group_name            = var.resource_group_name
   location                       = var.primary_location
   log_analytics_workspace_id     = azurerm_log_analytics_workspace.primary.id
+  logs_destination               = "log-analytics"
   infrastructure_subnet_id       = var.primary_default_subnet_id
   internal_load_balancer_enabled = true
   zone_redundancy_enabled        = false
@@ -100,6 +101,7 @@ resource "azurerm_container_app_environment" "secondary" {
   resource_group_name            = var.resource_group_name
   location                       = var.secondary_location
   log_analytics_workspace_id     = azurerm_log_analytics_workspace.secondary.id
+  logs_destination               = "log-analytics"
   infrastructure_subnet_id       = var.secondary_default_subnet_id
   internal_load_balancer_enabled = true
   zone_redundancy_enabled        = false
