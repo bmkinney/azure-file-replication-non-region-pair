@@ -1,0 +1,17 @@
+variable "resource_group_name" { type = string }
+variable "primary_location" { type = string }
+variable "secondary_location" { type = string }
+variable "environment_name" { type = string }
+variable "monitoring_token" { type = string }
+variable "monitoring_enabled" { type = bool }
+variable "active_region" { type = string }
+variable "container_image" { type = string }
+variable "primary_job_id" { type = string }
+variable "primary_job_name" { type = string }
+variable "secondary_job_id" { type = string }
+variable "secondary_job_name" { type = string }
+variable "primary_log_workspace_id" { type = string }
+variable "secondary_log_workspace_id" { type = string }
+variable "alert_email_addresses" { type = list(string) }
+variable "replication_lag_threshold_minutes" { type = number }
+variable "tags" { type = map(string) }

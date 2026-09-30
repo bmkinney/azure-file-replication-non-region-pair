@@ -1,4 +1,4 @@
-[CmdletBinding(SupportsShouldProcess)]
+[CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'Bicep')]
 param(
     [Parameter(Mandatory)]
     [ValidateSet('primary', 'secondary')]
@@ -7,15 +7,28 @@ param(
     [Parameter(Mandatory)]
     [switch]$WritesFenced,
 
-    [string]$ResourceGroupName = 'rg-azure-files-replication-demo',
+    [string]$ResourceGroupName,
 
     # Resource group of the secondary-region job when it differs from -ResourceGroupName.
+    [Parameter(ParameterSetName = 'Bicep')]
     [string]$SecondaryResourceGroupName,
 
+    [Parameter(ParameterSetName = 'Bicep')]
     [string]$Location = 'southcentralus',
-    [string]$ParametersFile = (Join-Path $PSScriptRoot '..\infra\main.bicepparam'),
+    [Parameter(ParameterSetName = 'Bicep')]
+    [string]$ParametersFile = (Join-Path $PSScriptRoot '..\deploy\bicep\main.bicepparam'),
     # Checked for existence only. Azure CLI deploys the template in the parameter file's using declaration.
-    [string]$TemplateFile
+    [Parameter(ParameterSetName = 'Bicep')]
+    [string]$TemplateFile,
+
+    [Parameter(Mandatory, ParameterSetName = 'Terraform')]
+    [string]$TerraformDirectory,
+
+    [Parameter(ParameterSetName = 'Terraform')]
+    [string]$VarFile,
+
+    [Parameter(ParameterSetName = 'Terraform')]
+    [string]$BackendConfig
 )
 
 Set-StrictMode -Version Latest
@@ -64,8 +77,130 @@ function Invoke-AzCli {
     return ($output -join [Environment]::NewLine)
 }
 
+function Invoke-Terraform {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+
+    $WhatIfPreference = $false
+    $errorPath = [IO.Path]::GetTempFileName()
+    try {
+        $output = & terraform @Arguments 2> $errorPath
+        $exitCode = $LASTEXITCODE
+        $errorOutput = [IO.File]::ReadAllText($errorPath)
+    } finally {
+        Remove-Item -LiteralPath $errorPath -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($exitCode -ne 0) {
+        $flatError = [regex]::Replace($errorOutput, '\s*\r?\n[ \t]*(\|[ \t]?)?', ' ').Trim()
+        throw "terraform $($Arguments -join ' ') failed:`n$flatError`n$($output -join [Environment]::NewLine)$(Get-RoleAssignmentHint $flatError)"
+    }
+    return ($output -join [Environment]::NewLine)
+}
+
+function Get-TerraformOutputValue($Outputs, [string]$Name) {
+    $property = $Outputs.PSObject.Properties[$Name]
+    if ($property) {
+        return $property.Value.value
+    }
+    return $null
+}
+
 if (-not $WritesFenced) {
     throw 'WritesFenced is required. Stop application writes before changing replication direction.'
+}
+if ($PSCmdlet.ParameterSetName -eq 'Terraform') {
+    if ([string]::IsNullOrWhiteSpace($VarFile)) {
+        $VarFile = Join-Path $TerraformDirectory 'terraform.tfvars'
+    }
+    $initArguments = @("-chdir=$TerraformDirectory", 'init', '-input=false', '-no-color')
+    if ($BackendConfig) {
+        $initArguments += "-backend-config=$BackendConfig"
+    }
+    $null = Invoke-Terraform -Arguments $initArguments
+    $outputs = Invoke-Terraform -Arguments @("-chdir=$TerraformDirectory", 'output', '-json') | ConvertFrom-Json
+    $terraformResourceGroupName = Get-TerraformOutputValue $outputs 'resource_group_name'
+    $jobGroup = if ($ResourceGroupName) { $ResourceGroupName } else { $terraformResourceGroupName }
+    if ([string]::IsNullOrWhiteSpace($jobGroup)) {
+        throw "Terraform output 'resource_group_name' was not found. Pass -ResourceGroupName."
+    }
+
+    $jobNames = @(
+        (Get-TerraformOutputValue $outputs 'primary_job_name'),
+        (Get-TerraformOutputValue $outputs 'secondary_job_name')
+    ) | Where-Object { $_ }
+    if ($jobNames.Count -ne 2) {
+        throw "Terraform output must include primary_job_name and secondary_job_name."
+    }
+
+    $jobs = foreach ($jobName in $jobNames) {
+        $job = Invoke-AzCli -Arguments @(
+            'containerapp', 'job', 'show',
+            '--resource-group', $jobGroup,
+            '--name', $jobName,
+            '--query', '{name:name,location:location,image:properties.template.containers[0].image}',
+            '--output', 'json'
+        ) | ConvertFrom-Json
+        [pscustomobject]@{ Name = $job.name; Location = $job.location; Image = $job.image; ResourceGroup = $jobGroup }
+    }
+
+    foreach ($job in $jobs) {
+        $running = Invoke-AzCli -Arguments @(
+            'containerapp', 'job', 'execution', 'list',
+            '--resource-group', $job.ResourceGroup,
+            '--name', $job.Name,
+            '--query', "[?properties.status=='Running'] | length(@)",
+            '--output', 'tsv'
+        )
+        if ([int]$running -gt 0) {
+            throw "Job '$($job.Name)' has a running execution. Wait for it to finish before switching direction."
+        }
+    }
+
+    $images = @($jobs | ForEach-Object { $_.Image } | Select-Object -Unique)
+    if ($images.Count -ne 1 -or $images[0] -notmatch '@sha256:[a-fA-F0-9]{64}$') {
+        throw 'Both jobs must use the same digest-pinned image before direction can be switched.'
+    }
+
+    if (-not $PSCmdlet.ShouldProcess($jobGroup, "Set '$ActiveRegion' as the only scheduled replication direction")) {
+        return
+    }
+
+    $applyArguments = @(
+        "-chdir=$TerraformDirectory", 'apply',
+        '-input=false', '-no-color', '-auto-approve',
+        "-var-file=$VarFile",
+        '-var', "container_image=$($images[0])",
+        '-var', "active_region=$ActiveRegion",
+        '-var', 'acr_public_network_access_enabled=false'
+    )
+    $null = Invoke-Terraform -Arguments $applyArguments
+    $postOutputs = Invoke-Terraform -Arguments @("-chdir=$TerraformDirectory", 'output', '-json') | ConvertFrom-Json
+    $activeJob = if ($ActiveRegion -eq 'primary') {
+        Get-TerraformOutputValue $postOutputs 'primary_job_name'
+    } else {
+        Get-TerraformOutputValue $postOutputs 'secondary_job_name'
+    }
+
+    Write-Host "Replication direction switched. Active scheduled job: $activeJob"
+    Write-Host 'Application writes remain fenced until validation is complete.'
+
+    if ((Get-TerraformOutputValue $postOutputs 'create_role_assignments') -eq $false) {
+        $grantCommand = "pwsh ./scripts/grant-access.ps1 -TerraformDirectory $TerraformDirectory"
+        try {
+            $missing = @(& (Join-Path $PSScriptRoot 'grant-access.ps1') -TerraformDirectory $TerraformDirectory -WhatIf -PassThru 6> $null | Where-Object Status -ne 'Exists')
+            if ($missing.Count -gt 0) {
+                $list = ($missing | ForEach-Object { "  $($_.Status): $($_.RoleName) for $($_.PrincipalName) on $($_.Scope)" }) -join "`n"
+                Write-Warning "The job identities are missing role assignments, so replication in the new direction fails until an administrator runs '$grantCommand':`n$list"
+            }
+        } catch {
+            Write-Warning "Could not check the job identities' role assignments. Check them with '$grantCommand -WhatIf'. $($_.Exception.Message)"
+        }
+    }
+    return
+}
+
+if ([string]::IsNullOrWhiteSpace($ResourceGroupName)) {
+    $ResourceGroupName = 'rg-azure-files-replication-demo'
 }
 if ([string]::IsNullOrWhiteSpace($TemplateFile)) {
     # A .bicepparam file names its template in its using declaration, for example main.local.bicepparam.

@@ -17,6 +17,10 @@ param(
     [Parameter(ParameterSetName = 'Resources')]
     [string]$RegistryId,
 
+    # Terraform state whose job_role_assignments output lists the assignments.
+    [Parameter(Mandatory, ParameterSetName = 'Terraform')]
+    [string]$TerraformDirectory,
+
     # Also returns one object per role assignment.
     [switch]$PassThru
 )
@@ -50,6 +54,27 @@ function Invoke-Az {
         Succeeded = $exitCode -eq 0
         Text      = ($output -join [Environment]::NewLine).Trim()
         Error     = if ($exitCode -ne 0) { if ($flatError) { $flatError } else { "Azure CLI exited with code $exitCode." } } else { $null }
+    }
+}
+
+function Invoke-Terraform {
+    param([Parameter(Mandatory)][string[]]$Arguments)
+
+    $WhatIfPreference = $false
+    $errorPath = [IO.Path]::GetTempFileName()
+    try {
+        $output = & terraform @Arguments 2> $errorPath
+        $exitCode = $LASTEXITCODE
+        $errorText = [IO.File]::ReadAllText($errorPath)
+    } finally {
+        Remove-Item -LiteralPath $errorPath -Force -ErrorAction SilentlyContinue
+    }
+
+    $flatError = [regex]::Replace($errorText, '\s*\r?\n[ \t]*(\|[ \t]?)?', ' ').Trim()
+    [pscustomobject]@{
+        Succeeded = $exitCode -eq 0
+        Text      = ($output -join [Environment]::NewLine).Trim()
+        Error     = if ($exitCode -ne 0) { if ($flatError) { $flatError } else { "Terraform exited with code $exitCode." } } else { $null }
     }
 }
 
@@ -91,21 +116,33 @@ if (-not $account.Succeeded) {
 $subscription = if ($account.Text) { $account.Text | ConvertFrom-Json } else { [pscustomobject]@{ name = 'the current subscription'; id = '' } }
 
 $required = [System.Collections.Generic.List[object]]::new()
-if ($PSCmdlet.ParameterSetName -eq 'Deployment') {
-    $source = "deployment $DeploymentName"
-    $deployment = Invoke-Az -Arguments @(
-        'deployment', 'sub', 'show',
-        '--name', $DeploymentName,
-        '--query', '{state: properties.provisioningState, assignments: properties.outputs.jobRoleAssignments.value}',
-        '--output', 'json'
-    )
-    if (-not $deployment.Succeeded) {
-        throw "Could not read subscription deployment '$DeploymentName' in $($subscription.name). $($deployment.Error)"
-    }
-    $details = $deployment.Text | ConvertFrom-Json
-    $listed = Get-Property $details 'assignments'
-    if ((Get-Property $details 'state') -ne 'Succeeded' -or $null -eq $listed) {
-        throw "Deployment '$DeploymentName' ($(Get-Property $details 'state')) doesn't list the job identities' role assignments. Name a successful deployment of the current templates, such as the bootstrap deployment that scripts/deploy.ps1 names, or grant the roles with -IdentityId, -StorageAccountId, and -RegistryId."
+if ($PSCmdlet.ParameterSetName -in @('Deployment', 'Terraform')) {
+    if ($PSCmdlet.ParameterSetName -eq 'Deployment') {
+        $source = "deployment $DeploymentName"
+        $deployment = Invoke-Az -Arguments @(
+            'deployment', 'sub', 'show',
+            '--name', $DeploymentName,
+            '--query', '{state: properties.provisioningState, assignments: properties.outputs.jobRoleAssignments.value}',
+            '--output', 'json'
+        )
+        if (-not $deployment.Succeeded) {
+            throw "Could not read subscription deployment '$DeploymentName' in $($subscription.name). $($deployment.Error)"
+        }
+        $details = $deployment.Text | ConvertFrom-Json
+        $listed = Get-Property $details 'assignments'
+        if ((Get-Property $details 'state') -ne 'Succeeded' -or $null -eq $listed) {
+            throw "Deployment '$DeploymentName' ($(Get-Property $details 'state')) doesn't list the job identities' role assignments. Name a successful deployment of the current templates, such as the bootstrap deployment that scripts/deploy.ps1 names, or grant the roles with -IdentityId, -StorageAccountId, and -RegistryId."
+        }
+    } else {
+        $source = "Terraform state in $TerraformDirectory"
+        $terraform = Invoke-Terraform -Arguments @("-chdir=$TerraformDirectory", 'output', '-json', 'job_role_assignments')
+        if (-not $terraform.Succeeded) {
+            throw "Could not read Terraform output 'job_role_assignments' in '$TerraformDirectory'. $($terraform.Error)"
+        }
+        $listed = @($terraform.Text | ConvertFrom-Json)
+        if ($listed.Count -eq 0) {
+            throw "Terraform state in '$TerraformDirectory' doesn't list the job identities' role assignments. Apply the Terraform module first, or grant the roles with -IdentityId, -StorageAccountId, and -RegistryId."
+        }
     }
 
     # Whoever deploys controls the outputs, so they can't widen the grant: only the job roles, on their resource types
