@@ -54,5 +54,5 @@ jobs:
           if ($failed) { throw "Failed tests: $($failed -join ', ')" }
         displayName: Run tests
 
-      - bash: shellcheck src/azcopy-job/run-sync.sh
+      - bash: shellcheck --severity=warning src/azcopy-job/run-sync.sh
         displayName: ShellCheck

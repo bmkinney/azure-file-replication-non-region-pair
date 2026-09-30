@@ -866,7 +866,11 @@ if ($ParametersOutputPath) {
     $outputFullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ParametersOutputPath)
     $templatePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\deploy\bicep\existing.bicep'))
     $usingPath = [IO.Path]::GetRelativePath((Split-Path -Parent $outputFullPath), $templatePath) -replace '\\', '/'
-    if (-not $usingPath.StartsWith('.')) {
+        # Bicep accepts only relative using paths, which can't cross drives.
+        if ([IO.Path]::IsPathRooted($usingPath)) {
+            throw "-ParametersOutputPath must be on the same drive as the repository, so that the file can reference $templatePath with a relative path. Use a path such as ./deploy/bicep/existing.bicepparam."
+        }
+        if (-not $usingPath.StartsWith('.')) {
         $usingPath = "./$usingPath"
     }
     $scopeText = if ($requestedGroups.Count -gt 0) { "resource groups $($auditedGroups -join ', ')" } else { 'every resource group in the subscription' }

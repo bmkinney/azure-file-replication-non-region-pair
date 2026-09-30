@@ -220,7 +220,13 @@ Assert-True (@($report.ResourceGroups).Count -eq 5) 'the whole subscription was 
 $null = Assert-Status $report 'Storage account' 'stother' 'Reusable'
 
 # Parameter file generation: reuse what fits, create what's missing or requested, and ask when the choice is ambiguous.
-$generatedRoot = Join-Path ([IO.Path]::GetTempPath()) "audit-generated-$([guid]::NewGuid().ToString('N'))"
+# Generated files reference the template with a relative path, so they must be on the repository's drive. Some hosts,
+# such as Windows CI runners, keep the temporary folder on another drive.
+$generatedBase = [IO.Path]::GetTempPath()
+if ([IO.Path]::GetPathRoot($generatedBase) -ne [IO.Path]::GetPathRoot($repositoryRoot)) {
+    $generatedBase = Split-Path $repositoryRoot -Parent
+}
+$generatedRoot = Join-Path $generatedBase "audit-generated-$([guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $generatedRoot | Out-Null
 $scopedGroups = @('rg-storage', 'rg-network', 'rg-dns', 'rg-registry')
 

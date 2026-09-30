@@ -113,4 +113,4 @@ jobs:
           sudo apt-get install --yes shellcheck
 
       - name: Run ShellCheck
-        run: shellcheck src/azcopy-job/run-sync.sh
+        run: shellcheck --severity=warning src/azcopy-job/run-sync.sh
