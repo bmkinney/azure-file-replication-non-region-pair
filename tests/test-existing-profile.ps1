@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 
-# Compiles infra/existing.bicep, sample parameter files, and the README examples to check the reuse-or-create, naming, and placement contract; no Azure calls are made.
+# Compiles deploy/bicep/existing.bicep, sample parameter files, and the README examples to check the reuse-or-create, naming, and placement contract; no Azure calls are made.
 
 $repositoryRoot = Split-Path $PSScriptRoot -Parent
 
@@ -10,9 +10,9 @@ function Assert-True([bool]$Condition, [string]$Message) {
     }
 }
 
-$compiledJson = (& az bicep build --file (Join-Path $repositoryRoot 'infra/existing.bicep') --stdout) -join [Environment]::NewLine
+$compiledJson = (& az bicep build --file (Join-Path $repositoryRoot 'deploy/bicep/existing.bicep') --stdout) -join [Environment]::NewLine
 if ($LASTEXITCODE -ne 0) {
-    throw 'Failed to compile infra/existing.bicep.'
+    throw 'Failed to compile deploy/bicep/existing.bicep.'
 }
 $template = $compiledJson | ConvertFrom-Json -Depth 100
 
@@ -152,7 +152,7 @@ Assert-True ($validation.Contains("variables('primaryIdentityIdValid')") -and $v
 
 # Parameter files compile for the example and for single, per-region, and per-service layouts; unknown values are rejected.
 $workRoot = Join-Path ([IO.Path]::GetTempPath()) "existing-profile-test-$([guid]::NewGuid().ToString('N'))"
-Copy-Item -Path (Join-Path $repositoryRoot 'infra') -Destination $workRoot -Recurse
+Copy-Item -Path (Join-Path $repositoryRoot 'deploy/bicep') -Destination $workRoot -Recurse
 function Test-Compiles([string]$Name, [string]$Body) {
     $path = Join-Path $workRoot "$Name.bicepparam"
     Set-Content -LiteralPath $path -Value $Body
@@ -213,8 +213,8 @@ param secondaryIdentityId = '$identityRoot/id-replication-wus2'
     Assert-True (Test-Compiles 'pipeline' $pipeline) 'a parameter file with reused identities and separately granted roles does not compile'
     Assert-True (-not (Test-Compiles 'unknown-identity-mode' "$base`nparam identityMode = 'shared'")) 'an unknown identityMode was accepted'
 
-    # The complete parameter files in README.md must compile, so the documented examples can't drift from the template.
-    $readme = [IO.File]::ReadAllText((Join-Path $repositoryRoot 'README.md'))
+    # The complete parameter files in deploy/bicep/README.md must compile, so the documented examples can't drift from the template.
+    $readme = [IO.File]::ReadAllText((Join-Path $repositoryRoot 'deploy/bicep/README.md'))
     $examples = @([regex]::Matches($readme, '(?ms)^```bicep\r?\n(using ''\./existing\.bicep''.*?)^```') | ForEach-Object { $_.Groups[1].Value })
     Assert-True ($examples.Count -ge 4) "expected at least four complete README parameter files, found $($examples.Count)"
     for ($index = 0; $index -lt $examples.Count; $index++) {
