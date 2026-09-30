@@ -1,0 +1,116 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  powershell-tests:
+    name: PowerShell tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.12.2
+          terraform_wrapper: false
+
+      - name: Install Azure Bicep CLI
+        run: |
+          az bicep install
+          az bicep upgrade
+          az bicep version
+
+      - name: Run PowerShell test scripts
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $tests = @(Get-ChildItem -LiteralPath 'tests' -Filter 'test-*.ps1' | Sort-Object FullName)
+          $tests += Get-Item -LiteralPath 'src/azcopy-job/test-run-sync.ps1'
+          $failed = [System.Collections.Generic.List[string]]::new()
+          foreach ($test in $tests) {
+            Write-Host "::group::$($test.FullName)"
+            & pwsh -NoProfile -File $test.FullName
+            $exitCode = $LASTEXITCODE
+            Write-Host '::endgroup::'
+            if ($exitCode -ne 0) {
+              $failed.Add($test.FullName)
+              Write-Host "::error file=$($test.FullName)::Test failed with exit code $exitCode."
+            }
+          }
+          if ($failed.Count -gt 0) {
+            throw "Failed tests: $($failed -join ', ')"
+          }
+
+  terraform:
+    name: Terraform validation
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: deploy/terraform
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@dfe3c3f87815947d99a8997f908cb6525fc44e9e # v4.0.1
+        with:
+          terraform_version: 1.12.2
+          terraform_wrapper: false
+
+      - name: Terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: Terraform init
+        run: terraform init -backend=false
+
+      - name: Terraform validate
+        run: terraform validate
+
+      - name: Terraform tests
+        run: terraform test
+
+  lint:
+    name: Shell lint
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck
+
+      - name: Run ShellCheck
+        run: shellcheck --severity=warning src/azcopy-job/run-sync.sh

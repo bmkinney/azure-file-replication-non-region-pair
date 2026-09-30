@@ -1,0 +1,158 @@
+name: Deploy Bicep
+
+on:
+  workflow_dispatch:
+    inputs:
+      operation:
+        description: Operation to run.
+        required: true
+        default: preview
+        type: choice
+        options:
+          - preview
+          - deploy
+          - switch-direction
+      active_region:
+        description: Region to activate for switch-direction.
+        required: true
+        default: primary
+        type: choice
+        options:
+          - primary
+          - secondary
+      writes_fenced:
+        description: Confirm application writes are fenced before switch-direction.
+        required: true
+        default: false
+        type: boolean
+      profile:
+        description: Bicep parameter profile contained in BICEP_PARAMETERS.
+        required: true
+        default: greenfield
+        type: choice
+        options:
+          - greenfield
+          - existing
+      environment:
+        description: GitHub environment that stores variables and secrets.
+        required: true
+        default: production
+        type: environment
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ inputs.environment }}
+  cancel-in-progress: false
+
+jobs:
+  deploy-bicep:
+    name: Bicep ${{ inputs.operation }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check configuration
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          BICEP_PARAMETERS: ${{ secrets.BICEP_PARAMETERS }}
+          OPERATION: ${{ inputs.operation }}
+          WRITES_FENCED: ${{ inputs.writes_fenced }}
+        run: |
+          $missing = [System.Collections.Generic.List[string]]::new()
+          foreach ($name in @('AZURE_CLIENT_ID', 'AZURE_TENANT_ID', 'AZURE_SUBSCRIPTION_ID')) {
+            if ([string]::IsNullOrWhiteSpace([Environment]::GetEnvironmentVariable($name))) {
+              $missing.Add($name)
+            }
+          }
+          if ([string]::IsNullOrWhiteSpace($env:BICEP_PARAMETERS)) {
+            $missing.Add('BICEP_PARAMETERS')
+          }
+          if ($env:OPERATION -eq 'switch-direction' -and $env:WRITES_FENCED -ne 'true') {
+            Write-Host '::error title=Writes must be fenced::switch-direction requires writes_fenced=true.'
+            exit 1
+          }
+          if ($missing.Count -gt 0) {
+            foreach ($name in $missing) {
+              Write-Host "::error title=Missing configuration::$name is required."
+            }
+            exit 1
+          }
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Azure login
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Install Azure CLI tools
+        run: |
+          az extension add --name containerapp --upgrade --only-show-errors
+          az bicep install --only-show-errors
+
+      - name: Write Bicep parameter file
+        env:
+          BICEP_PARAMETERS: ${{ secrets.BICEP_PARAMETERS }}
+          PROFILE: ${{ inputs.profile }}
+        run: |
+          $template = if ($env:PROFILE -eq 'existing') { 'existing.bicep' } else { 'main.bicep' }
+          if ($env:BICEP_PARAMETERS -notmatch "(?m)^\s*using\s+'\./$([regex]::Escape($template))'") {
+            Write-Host "::error title=Profile mismatch::BICEP_PARAMETERS must start with using './$template' for the $env:PROFILE profile."
+            exit 1
+          }
+          Set-Content -LiteralPath 'deploy/bicep/pipeline.local.bicepparam' -Value $env:BICEP_PARAMETERS -NoNewline
+
+      - name: Run Bicep operation
+        env:
+          OPERATION: ${{ inputs.operation }}
+          ACTIVE_REGION: ${{ inputs.active_region }}
+          AZURE_LOCATION: ${{ vars.AZURE_LOCATION }}
+          BICEP_RESOURCE_GROUP_NAME: ${{ vars.BICEP_RESOURCE_GROUP_NAME }}
+          BICEP_SECONDARY_RESOURCE_GROUP_NAME: ${{ vars.BICEP_SECONDARY_RESOURCE_GROUP_NAME }}
+        run: |
+          $parametersFile = 'deploy/bicep/pipeline.local.bicepparam'
+          $imageContext = (Resolve-Path 'src/azcopy-job').Path
+          $locationArgs = @()
+          if (-not [string]::IsNullOrWhiteSpace($env:AZURE_LOCATION)) {
+            $locationArgs += @('-Location', $env:AZURE_LOCATION)
+          }
+
+          switch ($env:OPERATION) {
+            'preview' {
+              & ./scripts/inventory.ps1 -ParametersFile $parametersFile @locationArgs
+              & ./scripts/deploy.ps1 -ParametersFile $parametersFile -ImageContext $imageContext @locationArgs -WhatIf
+            }
+            'deploy' {
+              & ./scripts/deploy.ps1 -ParametersFile $parametersFile -ImageContext $imageContext @locationArgs -Confirm:$false
+            }
+            'switch-direction' {
+              $switchArgs = @('-ActiveRegion', $env:ACTIVE_REGION, '-WritesFenced', '-ParametersFile', $parametersFile)
+              if (-not [string]::IsNullOrWhiteSpace($env:BICEP_RESOURCE_GROUP_NAME)) {
+                $switchArgs += @('-ResourceGroupName', $env:BICEP_RESOURCE_GROUP_NAME)
+              }
+              if (-not [string]::IsNullOrWhiteSpace($env:BICEP_SECONDARY_RESOURCE_GROUP_NAME)) {
+                $switchArgs += @('-SecondaryResourceGroupName', $env:BICEP_SECONDARY_RESOURCE_GROUP_NAME)
+              }
+              if (-not [string]::IsNullOrWhiteSpace($env:AZURE_LOCATION)) {
+                $switchArgs += @('-Location', $env:AZURE_LOCATION)
+              }
+              & ./scripts/switch-direction.ps1 @switchArgs
+            }
+          }
+
+      - name: Cleanup generated files
+        if: always()
+        run: |
+          Remove-Item -LiteralPath 'deploy/bicep/pipeline.local.bicepparam' -Force -ErrorAction SilentlyContinue

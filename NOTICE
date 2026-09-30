@@ -1,0 +1,16 @@
+Azure Files Replication Non-Region Pair
+Copyright 2024-2026 Brian Kinney
+
+This product is licensed under the Apache License, Version 2.0. See the LICENSE
+file in the root of this repository.
+
+Third-party software
+
+The AzCopy container image that src/azcopy-job/Dockerfile builds downloads
+AzCopy from https://github.com/Azure/azure-storage-azcopy and uses the
+ubuntu:24.04 base image. Those components are not part of this repository and
+are distributed under their own licenses.
+
+The Terraform configuration in deploy/terraform downloads HashiCorp Terraform
+providers from the Terraform Registry at initialization. Those providers are
+distributed under their own licenses.

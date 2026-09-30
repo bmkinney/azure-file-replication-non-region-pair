@@ -1,0 +1,25 @@
+resource_group_name = "rg-azure-files-replication-demo"
+# primary_dns_resource_group_name   = "rg-azure-files-replication-demo-primary-dns"
+# secondary_dns_resource_group_name = "rg-azure-files-replication-demo-secondary-dns"
+resource_group_location = "centralus"
+primary_location        = "southcentralus"
+secondary_location      = "westus"
+environment_name        = "demo"
+
+# The deployment script records the activated direction and pinned image after bootstrap.
+active_region                     = "none"
+container_image                   = "mcr.microsoft.com/azuredocs/containerapps-helloworld:latest"
+acr_public_network_access_enabled = true
+
+schedule_cron_expression          = "*/10 * * * *"
+replication_lag_threshold_minutes = 30
+monitoring_enabled                = true
+create_role_assignments           = true
+
+alert_email_addresses = ["ops@example.com"]
+
+tags = {
+  Environment = "demo"
+  Workload    = "azure-files-dr-replication"
+  ManagedBy   = "Terraform"
+}

@@ -19,7 +19,7 @@ function Resolve-TemplateValue($Template, $Value) {
 # The greenfield foundation declares both regions; the existing-resource profile deploys one region module per region.
 $expectedCounts = [ordered]@{ 'foundation.bicep' = 2; 'replication-region.bicep' = 1 }
 foreach ($moduleName in $expectedCounts.Keys) {
-    $modulePath = Join-Path $PSScriptRoot "../infra/modules/$moduleName"
+    $modulePath = Join-Path $PSScriptRoot "../deploy/bicep/modules/$moduleName"
     $compiledJson = (& az bicep build --file $modulePath --stdout) -join [Environment]::NewLine
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to compile $moduleName."
@@ -74,7 +74,7 @@ foreach ($moduleName in $expectedCounts.Keys) {
 }
 
 # main.bicep passes createRoleAssignments through and reports the assignments for scripts/deploy.ps1 and scripts/grant-access.ps1.
-$mainJson = (& az bicep build --file (Join-Path $PSScriptRoot '../infra/main.bicep') --stdout) -join [Environment]::NewLine
+$mainJson = (& az bicep build --file (Join-Path $PSScriptRoot '../deploy/bicep/main.bicep') --stdout) -join [Environment]::NewLine
 if ($LASTEXITCODE -ne 0) {
     throw 'Failed to compile main.bicep.'
 }

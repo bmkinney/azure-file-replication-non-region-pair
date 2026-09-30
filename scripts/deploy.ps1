@@ -3,7 +3,7 @@ param(
     [string]$Location = 'southcentralus',
     # Template compiled as a pre-deployment check. Azure CLI deploys the template in the parameter file's using declaration.
     [string]$TemplateFile,
-    [string]$ParametersFile = (Join-Path $PSScriptRoot '..\infra\main.bicepparam'),
+    [string]$ParametersFile = (Join-Path $PSScriptRoot '..\deploy\bicep\main.bicepparam'),
     [string]$ImageContext = (Join-Path $PSScriptRoot '..\src\azcopy-job'),
     [string]$ImageRepository = 'azure-files-dr-azcopy',
     [string]$ImageTag = '10.30.1',

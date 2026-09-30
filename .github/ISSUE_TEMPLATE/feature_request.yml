@@ -1,0 +1,35 @@
+name: Feature request
+description: Suggest an improvement to the deployment methods, scripts, or documentation.
+labels:
+  - enhancement
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What you're trying to do, and what gets in the way.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: How you'd like it to work.
+    validations:
+      required: true
+  - type: dropdown
+    id: methods
+    attributes:
+      label: Deployment methods affected
+      multiple: true
+      options:
+        - Bicep
+        - Terraform
+        - Azure portal guide
+        - Scripts
+        - CI/CD pipelines
+        - Documentation
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered

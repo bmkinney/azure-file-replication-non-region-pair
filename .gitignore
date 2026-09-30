@@ -1,6 +1,6 @@
-infra/main.json
-infra/existing.bicepparam
-infra/*.local.bicepparam
+deploy/bicep/main.json
+deploy/bicep/existing.bicepparam
+deploy/bicep/*.local.bicepparam
 inventory-report*.json
 audit-report*.json
 *.log

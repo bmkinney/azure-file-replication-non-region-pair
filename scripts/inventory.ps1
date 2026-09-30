@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$ParametersFile = (Join-Path $PSScriptRoot '..\infra\main.bicepparam'),
+    [string]$ParametersFile = (Join-Path $PSScriptRoot '..\deploy\bicep\main.bicepparam'),
     [string]$Location,
     [switch]$SkipWhatIf,
     [string]$OutputPath,
@@ -212,7 +212,7 @@ function Get-ParameterValue([string]$Name) {
 }
 
 $isExistingProfile = $null -ne (Get-Property $templateParameters 'primaryStorageAccountName')
-$profileName = if ($isExistingProfile) { 'existing resources (infra/existing.bicep)' } else { 'greenfield (infra/main.bicep)' }
+$profileName = if ($isExistingProfile) { 'existing resources (deploy/bicep/existing.bicep)' } else { 'greenfield (deploy/bicep/main.bicep)' }
 # createRoleAssignments = false leaves the job identities' roles to an administrator, who grants them with scripts/grant-access.ps1.
 $createRoleAssignments = (Get-ParameterValue 'createRoleAssignments') -ne $false
 $reusesIdentities = $isExistingProfile -and [string](Get-ParameterValue 'identityMode') -eq 'existing'

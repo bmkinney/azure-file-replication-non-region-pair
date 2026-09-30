@@ -1,0 +1,27 @@
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: terraform
+    directory: /deploy/terraform
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      terraform-providers:
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: docker
+    directory: /src/azcopy-job
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5

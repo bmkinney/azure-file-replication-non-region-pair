@@ -625,7 +625,7 @@ Write-Host 'Summary' -ForegroundColor Cyan
 Write-Host ("Services: {0} reusable, {1} need changes, {2} not suitable, {3} not verified." -f $summary.Reusable, $summary.NeedsChanges, $summary.NotSuitable, $summary.NotVerified)
 Write-Host 'Reuse a VNet in each region whose readiness row shows a job subnet, or let the deployment add a job subnet or create a VNet. The deployment can also create missing endpoints and services.'
 if (-not $ParametersOutputPath) {
-    Write-Host 'To write a parameter file from this audit, rerun with -PrimaryLocation, -SecondaryLocation, and -ParametersOutputPath ./infra/existing.bicepparam.'
+    Write-Host 'To write a parameter file from this audit, rerun with -PrimaryLocation, -SecondaryLocation, and -ParametersOutputPath ./deploy/bicep/existing.bicepparam.'
 }
 Write-Host 'Endpoints and private DNS zones in other subscriptions are not audited.'
 
@@ -864,9 +864,13 @@ if ($ParametersOutputPath) {
     }
 
     $outputFullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($ParametersOutputPath)
-    $templatePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\infra\existing.bicep'))
+    $templatePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\deploy\bicep\existing.bicep'))
     $usingPath = [IO.Path]::GetRelativePath((Split-Path -Parent $outputFullPath), $templatePath) -replace '\\', '/'
-    if (-not $usingPath.StartsWith('.')) {
+        # Bicep accepts only relative using paths, which can't cross drives.
+        if ([IO.Path]::IsPathRooted($usingPath)) {
+            throw "-ParametersOutputPath must be on the same drive as the repository, so that the file can reference $templatePath with a relative path. Use a path such as ./deploy/bicep/existing.bicepparam."
+        }
+        if (-not $usingPath.StartsWith('.')) {
         $usingPath = "./$usingPath"
     }
     $scopeText = if ($requestedGroups.Count -gt 0) { "resource groups $($auditedGroups -join ', ')" } else { 'every resource group in the subscription' }
@@ -1043,5 +1047,5 @@ if ($ParametersOutputPath) {
     if (-not $compiled.Succeeded) {
         Write-Warning "The parameter file doesn't compile against existing.bicep: $($compiled.Error)"
     }
-    Write-Host "Keep it out of source control; infra/existing.bicepparam and infra/*.local.bicepparam are git-ignored. Next: pwsh ./scripts/inventory.ps1 -ParametersFile $ParametersOutputPath"
+    Write-Host "Keep it out of source control; deploy/bicep/existing.bicepparam and deploy/bicep/*.local.bicepparam are git-ignored. Next: pwsh ./scripts/inventory.ps1 -ParametersFile $ParametersOutputPath"
 }

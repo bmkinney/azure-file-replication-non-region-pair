@@ -1,6 +1,6 @@
 $ErrorActionPreference = 'Stop'
 
-$modulePath = Join-Path $PSScriptRoot '../infra/modules/monitoring.bicep'
+$modulePath = Join-Path $PSScriptRoot '../deploy/bicep/modules/monitoring.bicep'
 $compiledJson = (& az bicep build --file $modulePath --stdout) -join [Environment]::NewLine
 if ($LASTEXITCODE -ne 0) {
     throw 'Failed to compile the monitoring Bicep module.'

@@ -1,10 +1,10 @@
 using './existing.bicep'
 
 // Annotated example of an existing-resource parameter file.
-// Copy it to infra/existing.bicepparam, which Git ignores, or generate that file from what already exists with
-// scripts/audit-existing-resources.ps1 -ParametersOutputPath ./infra/existing.bicepparam.
+// Copy it to deploy/bicep/existing.bicepparam, which Git ignores, or generate that file from what already exists with
+// scripts/audit-existing-resources.ps1 -ParametersOutputPath ./deploy/bicep/existing.bicepparam.
 // Replace every value in angle brackets, then check the file with
-// pwsh ./scripts/inventory.ps1 -ParametersFile ./infra/existing.bicepparam.
+// pwsh ./scripts/inventory.ps1 -ParametersFile ./deploy/bicep/existing.bicepparam.
 // README.md, section "Customize the parameter file", explains every setting. Unset parameters use their defaults,
 // which reuse every service and place everything the deployment creates in resourceGroupName.
 
