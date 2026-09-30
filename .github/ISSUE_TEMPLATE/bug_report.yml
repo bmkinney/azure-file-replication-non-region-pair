@@ -1,0 +1,64 @@
+name: Bug report
+description: Report a problem with a deployment method, script, or the replication job.
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the report. Don't include subscription IDs, tenant IDs, resource IDs, email addresses, tokens, or inventory and audit reports; replace them with placeholders. Report security vulnerabilities privately, as described in SECURITY.md.
+  - type: dropdown
+    id: method
+    attributes:
+      label: Deployment method
+      options:
+        - Bicep greenfield deployment
+        - Bicep existing-resource profile
+        - Terraform
+        - Azure portal guide
+        - Scripts only
+        - CI/CD pipelines
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      placeholder: v1.0.0 or a commit SHA
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The commands you ran, with parameters.
+      placeholder: |
+        1. pwsh ./scripts/deploy.ps1 -ParametersFile ./deploy/bicep/main.local.bicepparam
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error output
+      description: The error messages and relevant log lines, with IDs removed.
+      render: shell
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Regions, and the versions of Azure CLI, Bicep, Terraform, and PowerShell.
+  - type: checkboxes
+    id: redacted
+    attributes:
+      label: Sensitive data
+      options:
+        - label: I removed subscription, tenant, and resource IDs, email addresses, and secrets from this report.
+          required: true
