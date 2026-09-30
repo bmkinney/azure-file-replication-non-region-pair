@@ -8,7 +8,7 @@ Third-party software
 
 The AzCopy container image that src/azcopy-job/Dockerfile builds downloads
 AzCopy from https://github.com/Azure/azure-storage-azcopy and uses the
-ubuntu:24.04 base image. Those components are not part of this repository and
+ubuntu:26.04 base image. Those components are not part of this repository and
 are distributed under their own licenses.
 
 The Terraform configuration in deploy/terraform downloads HashiCorp Terraform
