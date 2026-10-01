@@ -19,13 +19,13 @@ if (-not $freshnessQuery.Contains('ago({0}m)')) {
     throw 'The compiled freshness query does not format the configured lag threshold.'
 }
 # Both regions can share one workspace, so each rule must count only its own job's successes.
-if (-not $freshnessQuery.Contains('| where ContainerJobName_s == "{2}"')) {
-    throw 'The compiled freshness query does not filter on the job name.'
+if (-not $freshnessQuery.Contains('| where EnvironmentName_s == "{3}" and ContainerJobName_s == "{2}"')) {
+    throw 'The compiled freshness query does not filter on the environment and job names.'
 }
 foreach ($role in 'primary', 'secondary') {
     $query = [string]$template.variables."${role}FreshnessQuery"
-    if (-not $query.Contains("variables('freshnessQueryTemplate')") -or -not $query.Contains("parameters('replicationLagThresholdMinutes')") -or -not $query.Contains("parameters('${role}JobName')")) {
-        throw "The $role freshness query does not format the template with the lag threshold and the $role job name."
+    if (-not $query.Contains("variables('freshnessQueryTemplate')") -or -not $query.Contains("parameters('replicationLagThresholdMinutes')") -or -not $query.Contains("parameters('${role}JobName')") -or -not $query.Contains("parameters('${role}EnvironmentName')")) {
+        throw "The $role freshness query does not format the template with the lag threshold and the $role environment and job names."
     }
 }
 

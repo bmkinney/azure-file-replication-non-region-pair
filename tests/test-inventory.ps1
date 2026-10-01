@@ -312,6 +312,10 @@ try {
     $workspaceRow = @($report.Prerequisites | Where-Object Item -eq 'primary log workspace log-missing')
     Assert-True ($workspaceRow.Count -eq 1 -and $workspaceRow[0].Status -eq 'Action required' -and $workspaceRow[0].Detail -like 'Not found.*') "a missing reused workspace was not flagged: $($workspaceRow | ConvertTo-Json -Compress)"
     Assert-True (@($report.Prerequisites | Where-Object Item -like 'secondary log workspace*').Count -eq 0) 'a workspace check ran for a region that creates its workspace'
+    $report = Invoke-Inventory $parametersFile @('primaryLogWorkspaceId=/subscriptions/sub/notResourceGroups/rg/providers/Microsoft.OperationalInsights/workspaces/log')
+    $workspaceRow = @($report.Prerequisites | Where-Object Item -eq 'primary log workspace')
+    Assert-True ($workspaceRow.Count -eq 1 -and $workspaceRow[0].Status -eq 'Action required' -and $workspaceRow[0].Detail -like '*must be the resource ID of a Log Analytics workspace*') "a malformed workspace ID was not flagged: $($workspaceRow | ConvertTo-Json -Compress)"
+    Assert-True (@($global:InventoryAzCalls | Where-Object { $_ -like 'resource show --ids *notResourceGroups*' }).Count -eq 0) 'a malformed workspace ID was looked up'
 
     $fakeAzRules = $commonRules + (Get-ExistingRules -PrimaryEndpoints @('pe-primary-file-a') -SecondaryEndpoints @('pe-secondary-file-b'))
     $report = Invoke-Inventory $parametersFile

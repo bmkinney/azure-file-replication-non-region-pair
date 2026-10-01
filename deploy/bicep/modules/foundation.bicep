@@ -693,6 +693,8 @@ resource secondaryJob 'Microsoft.App/jobs@2025-01-01' = {
 
 output primaryJobName string = primaryJob.name
 output secondaryJobName string = secondaryJob.name
+output primaryEnvironmentName string = primaryEnvironment.name
+output secondaryEnvironmentName string = secondaryEnvironment.name
 output primaryJobId string = primaryJob.id
 output secondaryJobId string = secondaryJob.id
 output primaryLogWorkspaceId string = primaryLog.id

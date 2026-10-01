@@ -119,7 +119,11 @@ foreach ($side in 'primary', 'secondary') {
 $monitoringParameters = (Get-Resource 'monitoring').properties.parameters
 foreach ($side in 'primary', 'secondary') {
     Assert-True ([string]$monitoringParameters."${side}LogWorkspaceLocation".value -eq "[reference('${side}Region').outputs.logWorkspaceLocation.value]") "the $side freshness rule doesn't follow its workspace's region"
+    Assert-True ([string]$monitoringParameters."${side}EnvironmentName".value -eq "[reference('${side}Region').outputs.environmentName.value]") "the $side freshness rule doesn't filter on its job's environment"
+    # The ID must equal one rebuilt from its own segments, which rejects empty or mislabeled segments.
+    Assert-True (([string]$template.variables."${side}LogWorkspaceIdValid").Contains("variables('logWorkspaceIdFormat')")) "${side}LogWorkspaceId isn't checked against the full workspace ID format"
 }
+Assert-True ($template.variables.logWorkspaceIdFormat -eq '/subscriptions/{0}/resourceGroups/{1}/providers/Microsoft.OperationalInsights/workspaces/{2}') 'the workspace ID format is wrong'
 $regionJson = (& az bicep build --file (Join-Path $repositoryRoot 'deploy/bicep/modules/replication-region.bicep') --stdout) -join [Environment]::NewLine
 Assert-True ($LASTEXITCODE -eq 0) 'replication-region.bicep does not compile'
 $regionTemplate = $regionJson | ConvertFrom-Json -Depth 100
@@ -174,6 +178,7 @@ Assert-True ($validation.Contains('identityMode is existing, so set primaryIdent
 Assert-True ($validation.Contains("variables('primaryIdentityIdValid')") -and $validation.Contains("variables('secondaryIdentityIdValid')")) 'identity IDs outside the deployment subscription must be rejected'
 Assert-True ($validation.Contains("variables('primaryLogWorkspaceIdValid')") -and $validation.Contains("variables('secondaryLogWorkspaceIdValid')")) 'malformed workspace IDs must be rejected'
 Assert-True ($validation.Contains('primaryLogWorkspaceId reuses a workspace, so remove resourceNames.primaryLogWorkspace')) 'a reused workspace with a name for a new one must be rejected'
+Assert-True ($validation.Contains('resourceNames gives both jobs the same job and environment names')) 'identical job and environment names for both jobs must be rejected'
 
 # Parameter files compile for the example and for single, per-region, and per-service layouts; unknown values are rejected.
 $workRoot = Join-Path ([IO.Path]::GetTempPath()) "existing-profile-test-$([guid]::NewGuid().ToString('N'))"

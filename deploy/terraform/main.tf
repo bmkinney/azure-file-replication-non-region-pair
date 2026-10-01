@@ -251,6 +251,8 @@ module "monitoring" {
   primary_job_name                  = module.replication.primary_job_name
   secondary_job_id                  = module.replication.secondary_job_id
   secondary_job_name                = module.replication.secondary_job_name
+  primary_environment_name          = module.replication.primary_environment_name
+  secondary_environment_name        = module.replication.secondary_environment_name
   primary_log_workspace_id          = module.replication.primary_log_workspace_id
   secondary_log_workspace_id        = module.replication.secondary_log_workspace_id
   alert_email_addresses             = var.alert_email_addresses

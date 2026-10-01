@@ -107,6 +107,8 @@ module monitoring 'modules/monitoring.bicep' = {
     primaryJobName: foundation.outputs.primaryJobName
     secondaryJobId: foundation.outputs.secondaryJobId
     secondaryJobName: foundation.outputs.secondaryJobName
+    primaryEnvironmentName: foundation.outputs.primaryEnvironmentName
+    secondaryEnvironmentName: foundation.outputs.secondaryEnvironmentName
     primaryLogWorkspaceId: foundation.outputs.primaryLogWorkspaceId
     secondaryLogWorkspaceId: foundation.outputs.secondaryLogWorkspaceId
     alertEmailAddresses: alertEmailAddresses

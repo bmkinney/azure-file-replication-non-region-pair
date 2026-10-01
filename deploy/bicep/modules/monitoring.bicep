@@ -15,6 +15,10 @@ param primaryJobId string
 param primaryJobName string
 param secondaryJobId string
 param secondaryJobName string
+
+@description('Container Apps environments of the jobs. With the job names, they identify each job\'s console logs in a workspace that other jobs share.')
+param primaryEnvironmentName string
+param secondaryEnvironmentName string
 param primaryLogWorkspaceId string
 param secondaryLogWorkspaceId string
 
@@ -51,18 +55,19 @@ var monitoringToken = uniqueString(subscription().id, resourceGroup().id, enviro
 var resolvedActionGroupName = empty(actionGroupName) ? 'ag-replication-${monitoringToken}' : actionGroupName
 var lagWindowSize = 'PT${replicationLagThresholdMinutes}M'
 // Until one threshold after deployment, the active direction counts as fresh; activation otherwise alerts before the first run's logs arrive.
-// Each rule counts only its own job's successes, so both regions can share one workspace with each other and other workloads.
+// Each rule counts only its own job's successes, by environment and job name, so both regions can share one workspace
+// with each other and other workloads.
 var freshnessQueryTemplate = '''
   let graceEndsAt = datetime({1}) + {0}m;
   ContainerAppConsoleLogs_CL
   | where TimeGenerated >= ago({0}m)
-  | where ContainerJobName_s == "{2}"
+  | where EnvironmentName_s == "{3}" and ContainerJobName_s == "{2}"
   | where Log_s contains "AZURE_FILES_REPLICATION_SUCCEEDED"
   | summarize SuccessCount = count()
   | extend SuccessCount = iff(now() < graceEndsAt, max_of(SuccessCount, 1), SuccessCount)
 '''
-var primaryFreshnessQuery = format(freshnessQueryTemplate, replicationLagThresholdMinutes, freshnessGraceStartTime, primaryJobName)
-var secondaryFreshnessQuery = format(freshnessQueryTemplate, replicationLagThresholdMinutes, freshnessGraceStartTime, secondaryJobName)
+var primaryFreshnessQuery = format(freshnessQueryTemplate, replicationLagThresholdMinutes, freshnessGraceStartTime, primaryJobName, primaryEnvironmentName)
+var secondaryFreshnessQuery = format(freshnessQueryTemplate, replicationLagThresholdMinutes, freshnessGraceStartTime, secondaryJobName, secondaryEnvironmentName)
 var emailReceivers = map(alertEmailAddresses, (emailAddress, index) => {
   name: 'replication-email-${index + 1}'
   emailAddress: emailAddress

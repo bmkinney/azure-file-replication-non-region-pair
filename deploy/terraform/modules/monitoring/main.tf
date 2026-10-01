@@ -7,13 +7,17 @@ resource "time_static" "freshness_grace_start" {
 
 locals {
   lag_window_size = "PT${var.replication_lag_threshold_minutes}M"
-  # Each rule counts only its own job's successes, so both regions can share one workspace.
+  # Each rule counts only its own job's successes, by environment and job name, so both regions can share one workspace.
+  freshness_jobs = {
+    primary   = { job = var.primary_job_name, environment = var.primary_environment_name }
+    secondary = { job = var.secondary_job_name, environment = var.secondary_environment_name }
+  }
   freshness_queries = {
-    for role, job_name in { primary = var.primary_job_name, secondary = var.secondary_job_name } : role => <<-KQL
+    for role, target in local.freshness_jobs : role => <<-KQL
   let graceEndsAt = datetime(${time_static.freshness_grace_start.rfc3339}) + ${var.replication_lag_threshold_minutes}m;
   ContainerAppConsoleLogs_CL
   | where TimeGenerated >= ago(${var.replication_lag_threshold_minutes}m)
-  | where ContainerJobName_s == "${job_name}"
+  | where EnvironmentName_s == "${target.environment}" and ContainerJobName_s == "${target.job}"
   | where Log_s contains "AZURE_FILES_REPLICATION_SUCCEEDED"
   | summarize SuccessCount = count()
   | extend SuccessCount = iff(now() < graceEndsAt, max_of(SuccessCount, 1), SuccessCount)

@@ -135,6 +135,7 @@ resource job 'Microsoft.App/jobs@2025-01-01' = {
 
 output jobId string = job.id
 output jobName string = job.name
+output environmentName string = managedEnvironment.name
 output logWorkspaceId string = reusesLogWorkspace ? existingLogWorkspaceId : logWorkspace.id
 output logWorkspaceName string = reusesLogWorkspace ? existingLogWorkspaceSegments[8] : logWorkspace.name
 output logWorkspaceLocation string = reusesLogWorkspace ? existingLogWorkspace!.location : location

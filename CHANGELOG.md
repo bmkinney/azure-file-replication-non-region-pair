@@ -19,5 +19,5 @@ All notable changes to this project are documented in this file. The format is b
 - Relicensed the project under the Apache License 2.0, with a `NOTICE` file.
 - Moved the Bicep templates from `infra/` to `deploy/bicep/`. Move local parameter files to the new folder, for example `deploy/bicep/main.local.bicepparam`; Git ignores the same file names there.
 - Split the README: the main README covers the architecture and the guidance that every method shares, and `deploy/bicep/README.md` covers the Bicep profiles and scripts.
-- Each freshness alert counts only its own job's success markers, so both regions and other workloads can share a workspace. This applies to the Bicep and Terraform deployments and to the portal guide.
+- Each freshness alert counts only its own job's success markers, by environment and job name, so both regions and other workloads can share a workspace. This applies to the Bicep and Terraform deployments and to the portal guide.
 - Troubleshooting covers `RequestDisallowedByPolicy` deployment failures.

@@ -126,7 +126,7 @@ Creating services needs rights beyond the [RBAC requirements](../../README.md#rb
 - Private DNS Zone Contributor on the zones that receive records.
 - `privateEndpointConnectionsApproval/action` on each existing storage account and registry that gets a new endpoint, for example through Owner or Contributor on the resource. The template requests automatic approval, so without this right the endpoint fails with `LinkedAuthorizationFailed` instead of waiting for approval.
 - `Microsoft.ManagedIdentity/userAssignedIdentities/assign/action` on reused job identities, for example through Managed Identity Operator, so that the deployment can attach them to the jobs.
-- `Microsoft.OperationalInsights/workspaces/sharedKeys/action` on reused Log Analytics workspaces, for example through Log Analytics Contributor, so that the Container Apps environments can send logs to them.
+- `Microsoft.OperationalInsights/workspaces/read` and `Microsoft.OperationalInsights/workspaces/sharedKeys/action` on reused Log Analytics workspaces, for example through Log Analytics Contributor, so that the deployment can read each workspace's ID, region, and key, and the Container Apps environments can send logs to it.
 
 ### Customize the parameter file
 
@@ -440,8 +440,8 @@ param secondaryLogWorkspaceId = '/subscriptions/<subscription-id>/resourceGroups
 ```
 
 - **Placement:** each workspace can be in any resource group, subscription, or region. Both regions can use the same workspace. A regional workspace for each region keeps the logs of a region available when the other region is down.
-- **Freshness alerts:** each freshness alert counts only its own job's success markers, so other workloads and the other region's job in the same workspace don't affect it. Each freshness alert is created in its workspace's region.
-- **Permissions:** the deploying identity needs `Microsoft.OperationalInsights/workspaces/sharedKeys/action` on each reused workspace, for example through Log Analytics Contributor. The Container Apps environment sends logs with the workspace's shared key, and the deployment reads that key. The [inventory check](#inventory-check) verifies that the workspace exists and that the signed-in identity can read the key.
+- **Freshness alerts:** each freshness alert counts only its own job's success markers, by environment and job name, so other workloads and the other region's job in the same workspace don't affect it. Each freshness alert is created in its workspace's region. The deployment rejects custom names that would give both jobs the same environment and job names.
+- **Permissions:** the deploying identity needs `Microsoft.OperationalInsights/workspaces/read` and `Microsoft.OperationalInsights/workspaces/sharedKeys/action` on each reused workspace, for example through Log Analytics Contributor. The deployment reads the workspace's ID, region, and shared key, and the Container Apps environment sends logs with that key. For a workspace in another subscription, Reader on the deployment subscription doesn't cover the read. The [inventory check](#inventory-check) verifies that the workspace exists and that the signed-in identity can read it and its key.
 - **Unchanged workspaces:** the deployment doesn't change the workspaces it reuses, so their retention and access settings stay under their owner's control.
 - **Switching an existing deployment:** an alert rule can't move to another region. If a deployment already created its own workspaces and you switch it to a workspace in another region, delete the freshness alert rules first; the deployment recreates them. You can delete the workspaces it created after their logs are no longer needed.
 

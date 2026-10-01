@@ -275,7 +275,7 @@ param replicationLagThresholdMinutes int = 30
 param monitoringEnabled bool = true
 
 // Log Analytics workspaces for the job logs. Reuse existing ones, for example when Azure Policy blocks new workspaces.
-@description('Resource ID of an existing Log Analytics workspace for the primary job logs, in any resource group or subscription. Empty creates a workspace. The deploying identity needs Microsoft.OperationalInsights/workspaces/sharedKeys/action on it.')
+@description('Resource ID of an existing Log Analytics workspace for the primary job logs, in any resource group or subscription. Empty creates a workspace. The deploying identity needs Microsoft.OperationalInsights/workspaces/read and Microsoft.OperationalInsights/workspaces/sharedKeys/action on it, for example through Log Analytics Contributor.')
 param primaryLogWorkspaceId string = ''
 
 @description('Resource ID of an existing Log Analytics workspace for the secondary job logs. It can be the same workspace as primaryLogWorkspaceId. Empty creates a workspace.')
@@ -308,10 +308,13 @@ var identityIdPrefix = toLower('/subscriptions/${subscription().subscriptionId}/
 var identityIdType = '/providers/microsoft.managedidentity/userassignedidentities/'
 var primaryIdentityIdValid = length(split(primaryIdentityId, '/')) == 9 && startsWith(toLower(primaryIdentityId), identityIdPrefix) && contains(toLower(primaryIdentityId), identityIdType)
 var secondaryIdentityIdValid = length(split(secondaryIdentityId, '/')) == 9 && startsWith(toLower(secondaryIdentityId), identityIdPrefix) && contains(toLower(secondaryIdentityId), identityIdType)
-// Workspaces can be in any subscription, so only the shape of their IDs is checked.
-var logWorkspaceIdPattern = '/providers/microsoft.operationalinsights/workspaces/'
-var primaryLogWorkspaceIdValid = length(split(primaryLogWorkspaceId, '/')) == 9 && startsWith(toLower(primaryLogWorkspaceId), '/subscriptions/') && contains(toLower(primaryLogWorkspaceId), logWorkspaceIdPattern)
-var secondaryLogWorkspaceIdValid = length(split(secondaryLogWorkspaceId, '/')) == 9 && startsWith(toLower(secondaryLogWorkspaceId), '/subscriptions/') && contains(toLower(secondaryLogWorkspaceId), logWorkspaceIdPattern)
+// Workspaces can be in any subscription, so only the structure of their IDs is checked: the padding keeps the indexes
+// valid for short values, and the ID must equal one rebuilt from its own segments.
+var primaryLogWorkspaceIdParts = concat(split(primaryLogWorkspaceId, '/'), ['', '', '', '', '', '', '', '', ''])
+var secondaryLogWorkspaceIdParts = concat(split(secondaryLogWorkspaceId, '/'), ['', '', '', '', '', '', '', '', ''])
+var logWorkspaceIdFormat = '/subscriptions/{0}/resourceGroups/{1}/providers/Microsoft.OperationalInsights/workspaces/{2}'
+var primaryLogWorkspaceIdValid = length(split(primaryLogWorkspaceId, '/')) == 9 && !empty(primaryLogWorkspaceIdParts[2]) && !empty(primaryLogWorkspaceIdParts[4]) && !empty(primaryLogWorkspaceIdParts[8]) && toLower(primaryLogWorkspaceId) == toLower(format(logWorkspaceIdFormat, primaryLogWorkspaceIdParts[2], primaryLogWorkspaceIdParts[4], primaryLogWorkspaceIdParts[8]))
+var secondaryLogWorkspaceIdValid = length(split(secondaryLogWorkspaceId, '/')) == 9 && !empty(secondaryLogWorkspaceIdParts[2]) && !empty(secondaryLogWorkspaceIdParts[4]) && !empty(secondaryLogWorkspaceIdParts[8]) && toLower(secondaryLogWorkspaceId) == toLower(format(logWorkspaceIdFormat, secondaryLogWorkspaceIdParts[2], secondaryLogWorkspaceIdParts[4], secondaryLogWorkspaceIdParts[8]))
 
 // Missing inputs stop the deployment during validation, before any resource changes.
 var inputErrors = filter([
@@ -336,6 +339,7 @@ var inputErrors = filter([
   !empty(secondaryLogWorkspaceId) && !secondaryLogWorkspaceIdValid ? 'secondaryLogWorkspaceId must be the resource ID of a Log Analytics workspace.' : ''
   !empty(primaryLogWorkspaceId) && !empty(resourceNames.?primaryLogWorkspace ?? '') ? 'primaryLogWorkspaceId reuses a workspace, so remove resourceNames.primaryLogWorkspace, which names a new one.' : ''
   !empty(secondaryLogWorkspaceId) && !empty(resourceNames.?secondaryLogWorkspace ?? '') ? 'secondaryLogWorkspaceId reuses a workspace, so remove resourceNames.secondaryLogWorkspace, which names a new one.' : ''
+  !empty(resourceNames.?primaryJob ?? '') && toLower(resourceNames.?primaryJob ?? '') == toLower(resourceNames.?secondaryJob ?? '') && toLower(resourceNames.?primaryEnvironment ?? '') == toLower(resourceNames.?secondaryEnvironment ?? '') && !empty(resourceNames.?primaryEnvironment ?? '') ? 'resourceNames gives both jobs the same job and environment names, which the freshness alerts use to tell the jobs\' logs apart. Change one of them.' : ''
 ], inputError => !empty(inputError))
 var validatedTags = empty(inputErrors) ? tags : fail(join(inputErrors, ' '))
 
@@ -771,6 +775,8 @@ module monitoring 'modules/monitoring.bicep' = {
     primaryJobName: primaryRegion.outputs.jobName
     secondaryJobId: secondaryRegion.outputs.jobId
     secondaryJobName: secondaryRegion.outputs.jobName
+    primaryEnvironmentName: primaryRegion.outputs.environmentName
+    secondaryEnvironmentName: secondaryRegion.outputs.environmentName
     primaryLogWorkspaceId: primaryRegion.outputs.logWorkspaceId
     secondaryLogWorkspaceId: secondaryRegion.outputs.logWorkspaceId
     primaryLogWorkspaceLocation: primaryRegion.outputs.logWorkspaceLocation
