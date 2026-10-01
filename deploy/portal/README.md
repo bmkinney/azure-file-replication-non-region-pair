@@ -576,11 +576,12 @@ $primaryJobId = $primaryJobObject.Id; $secondaryJobId = $secondaryJobObject.Id
 
 Create an action group with short name `file-repl`, email receivers, and common alert schema. Create per-job metric alerts on `Microsoft.App/jobs` metric `Executions`, aggregation **Total**, dimension `state = Failed`, threshold `> 0`, severity 1, frequency 1 minute, window 5 minutes.
 
-Create freshness log search alerts with this KQL, without the grace lines used by the Bicep template:
+Create a freshness log search alert for each job with this KQL, without the grace lines used by the Bicep template. Replace `<job-name>` with that alert's job, so that each alert counts only its own job's successes, even in a shared workspace:
 
 ```kusto
 ContainerAppConsoleLogs_CL
 | where TimeGenerated >= ago(30m)
+| where ContainerJobName_s == "<job-name>"
 | where Log_s contains "AZURE_FILES_REPLICATION_SUCCEEDED"
 | summarize SuccessCount = count()
 ```
@@ -594,10 +595,10 @@ Keep both freshness alerts disabled until the first successful run. Then enable 
 $actionGroupId = az monitor action-group create -g $workloadRg -n $actionGroup --short-name file-repl --action email ops $alertEmail usecommonalertschema --tags $tags --query id -o tsv
 az monitor metrics alert create -g $workloadRg -n "alert-replication-failed-primary-$suffix" --scopes $primaryJobId --severity 1 --evaluation-frequency 1m --window-size 5m --auto-mitigate true --target-resource-type Microsoft.App/jobs --target-resource-region $primaryLocation --condition "total Executions > 0 where state includes Failed" --action $actionGroupId --tags $tags
 az monitor metrics alert create -g $workloadRg -n "alert-replication-failed-secondary-$suffix" --scopes $secondaryJobId --severity 1 --evaluation-frequency 1m --window-size 5m --auto-mitigate true --target-resource-type Microsoft.App/jobs --target-resource-region $secondaryLocation --condition "total Executions > 0 where state includes Failed" --action $actionGroupId --tags $tags
-$freshnessQuery = "ContainerAppConsoleLogs_CL | where TimeGenerated >= ago($($lagMinutes)m) | where Log_s contains 'AZURE_FILES_REPLICATION_SUCCEEDED' | summarize SuccessCount = count()"
+$freshnessQueries = @{}; foreach ($job in $primaryJob, $secondaryJob) { $freshnessQueries[$job] = "ContainerAppConsoleLogs_CL | where TimeGenerated >= ago($($lagMinutes)m) | where ContainerJobName_s == '$job' | where Log_s contains 'AZURE_FILES_REPLICATION_SUCCEEDED' | summarize SuccessCount = count()" }
 $freshnessCondition = "max 'SuccessCount' from 'Freshness' < 1 at least 1 violations out of 1 aggregated points"
-az monitor scheduled-query create -g $workloadRg -n "alert-replication-stale-primary-$suffix" -l $primaryLocation --scopes $primaryWorkspaceId --severity 2 --evaluation-frequency 10m --window-size "$($lagMinutes)m" --auto-mitigate true --skip-query-validation true --disabled true --action-groups $actionGroupId --condition $freshnessCondition --condition-query Freshness="$freshnessQuery" --tags $tags
-az monitor scheduled-query create -g $workloadRg -n "alert-replication-stale-secondary-$suffix" -l $secondaryLocation --scopes $secondaryWorkspaceId --severity 2 --evaluation-frequency 10m --window-size "$($lagMinutes)m" --auto-mitigate true --skip-query-validation true --disabled true --action-groups $actionGroupId --condition $freshnessCondition --condition-query Freshness="$freshnessQuery" --tags $tags
+az monitor scheduled-query create -g $workloadRg -n "alert-replication-stale-primary-$suffix" -l $primaryLocation --scopes $primaryWorkspaceId --severity 2 --evaluation-frequency 10m --window-size "$($lagMinutes)m" --auto-mitigate true --skip-query-validation true --disabled true --action-groups $actionGroupId --condition $freshnessCondition --condition-query Freshness="$($freshnessQueries[$primaryJob])" --tags $tags
+az monitor scheduled-query create -g $workloadRg -n "alert-replication-stale-secondary-$suffix" -l $secondaryLocation --scopes $secondaryWorkspaceId --severity 2 --evaluation-frequency 10m --window-size "$($lagMinutes)m" --auto-mitigate true --skip-query-validation true --disabled true --action-groups $actionGroupId --condition $freshnessCondition --condition-query Freshness="$($freshnessQueries[$secondaryJob])" --tags $tags
 ```
 
 </details>
@@ -613,10 +614,10 @@ $failedDimension = New-AzMetricAlertRuleV2DimensionSelection -DimensionName stat
 $failedCriteria = New-AzMetricAlertRuleV2Criteria -MetricNamespace Microsoft.App/jobs -MetricName Executions -TimeAggregation Total -Operator GreaterThan -Threshold 0 -DimensionSelection $failedDimension -SkipMetricValidation:$false
 Add-AzMetricAlertRuleV2 -ResourceGroupName $workloadRg -Name "alert-replication-failed-primary-$suffix" -TargetResourceId $primaryJobId -TargetResourceType Microsoft.App/jobs -TargetResourceRegion $primaryLocation -WindowSize ([TimeSpan]::FromMinutes(5)) -Frequency ([TimeSpan]::FromMinutes(1)) -Severity 1 -Condition $failedCriteria -ActionGroupId $actionGroupId -AutoMitigate $true
 Add-AzMetricAlertRuleV2 -ResourceGroupName $workloadRg -Name "alert-replication-failed-secondary-$suffix" -TargetResourceId $secondaryJobId -TargetResourceType Microsoft.App/jobs -TargetResourceRegion $secondaryLocation -WindowSize ([TimeSpan]::FromMinutes(5)) -Frequency ([TimeSpan]::FromMinutes(1)) -Severity 1 -Condition $failedCriteria -ActionGroupId $actionGroupId -AutoMitigate $true
-$freshnessQuery = "ContainerAppConsoleLogs_CL | where TimeGenerated >= ago($($lagMinutes)m) | where Log_s contains 'AZURE_FILES_REPLICATION_SUCCEEDED' | summarize SuccessCount = count()"
-$freshnessCondition = New-AzScheduledQueryRuleConditionObject -Query $freshnessQuery -TimeAggregation Maximum -MetricMeasureColumn SuccessCount -Operator LessThan -Threshold 1 -FailingPeriodNumberOfEvaluationPeriod 1 -FailingPeriodMinFailingPeriodsToAlert 1
-New-AzScheduledQueryRule -ResourceGroupName $workloadRg -Name "alert-replication-stale-primary-$suffix" -Location $primaryLocation -Scope $primaryWorkspaceId -Severity 2 -WindowSize ([TimeSpan]::FromMinutes($lagMinutes)) -EvaluationFrequency ([TimeSpan]::FromMinutes(10)) -CriterionAllOf $freshnessCondition -ActionGroupResourceId $actionGroupId -SkipQueryValidation -Enabled:$false -Tag $tags
-New-AzScheduledQueryRule -ResourceGroupName $workloadRg -Name "alert-replication-stale-secondary-$suffix" -Location $secondaryLocation -Scope $secondaryWorkspaceId -Severity 2 -WindowSize ([TimeSpan]::FromMinutes($lagMinutes)) -EvaluationFrequency ([TimeSpan]::FromMinutes(10)) -CriterionAllOf $freshnessCondition -ActionGroupResourceId $actionGroupId -SkipQueryValidation -Enabled:$false -Tag $tags
+$freshnessQueries = @{}; foreach ($job in $primaryJob, $secondaryJob) { $freshnessQueries[$job] = "ContainerAppConsoleLogs_CL | where TimeGenerated >= ago($($lagMinutes)m) | where ContainerJobName_s == '$job' | where Log_s contains 'AZURE_FILES_REPLICATION_SUCCEEDED' | summarize SuccessCount = count()" }
+$freshnessConditions = @{}; foreach ($job in $primaryJob, $secondaryJob) { $freshnessConditions[$job] = New-AzScheduledQueryRuleConditionObject -Query $freshnessQueries[$job] -TimeAggregation Maximum -MetricMeasureColumn SuccessCount -Operator LessThan -Threshold 1 -FailingPeriodNumberOfEvaluationPeriod 1 -FailingPeriodMinFailingPeriodsToAlert 1 }
+New-AzScheduledQueryRule -ResourceGroupName $workloadRg -Name "alert-replication-stale-primary-$suffix" -Location $primaryLocation -Scope $primaryWorkspaceId -Severity 2 -WindowSize ([TimeSpan]::FromMinutes($lagMinutes)) -EvaluationFrequency ([TimeSpan]::FromMinutes(10)) -CriterionAllOf $freshnessConditions[$primaryJob] -ActionGroupResourceId $actionGroupId -SkipQueryValidation -Enabled:$false -Tag $tags
+New-AzScheduledQueryRule -ResourceGroupName $workloadRg -Name "alert-replication-stale-secondary-$suffix" -Location $secondaryLocation -Scope $secondaryWorkspaceId -Severity 2 -WindowSize ([TimeSpan]::FromMinutes($lagMinutes)) -EvaluationFrequency ([TimeSpan]::FromMinutes(10)) -CriterionAllOf $freshnessConditions[$secondaryJob] -ActionGroupResourceId $actionGroupId -SkipQueryValidation -Enabled:$false -Tag $tags
 ```
 
 </details>
@@ -645,7 +646,7 @@ az monitor scheduled-query update -g $workloadRg -n "alert-replication-stale-pri
 ```powershell
 Start-AzContainerAppJob -ResourceGroupName $workloadRg -Name $primaryJob
 Update-AzContainerAppJob -ResourceGroupName $workloadRg -Name $primaryJob -ConfigurationTriggerType Schedule -ScheduleTriggerConfigCronExpression $scheduleCron -ScheduleTriggerConfigParallelism 1 -ScheduleTriggerConfigReplicaCompletionCount 1 -ConfigurationReplicaTimeout 3600 -ConfigurationReplicaRetryLimit 2
-New-AzScheduledQueryRule -ResourceGroupName $workloadRg -Name "alert-replication-stale-primary-$suffix" -Location $primaryLocation -Scope $primaryWorkspaceId -Severity 2 -WindowSize ([TimeSpan]::FromMinutes($lagMinutes)) -EvaluationFrequency ([TimeSpan]::FromMinutes(10)) -CriterionAllOf $freshnessCondition -ActionGroupResourceId $actionGroupId -SkipQueryValidation -Enabled -Tag $tags
+New-AzScheduledQueryRule -ResourceGroupName $workloadRg -Name "alert-replication-stale-primary-$suffix" -Location $primaryLocation -Scope $primaryWorkspaceId -Severity 2 -WindowSize ([TimeSpan]::FromMinutes($lagMinutes)) -EvaluationFrequency ([TimeSpan]::FromMinutes(10)) -CriterionAllOf $freshnessConditions[$primaryJob] -ActionGroupResourceId $actionGroupId -SkipQueryValidation -Enabled -Tag $tags
 ```
 
 </details>
@@ -674,8 +675,8 @@ az monitor scheduled-query update -g $workloadRg -n "alert-replication-stale-sec
 ```powershell
 Update-AzContainerAppJob -ResourceGroupName $workloadRg -Name $primaryJob -ConfigurationTriggerType Manual -ManualTriggerConfigParallelism 1 -ManualTriggerConfigReplicaCompletionCount 1 -ConfigurationReplicaTimeout 3600 -ConfigurationReplicaRetryLimit 2
 Update-AzContainerAppJob -ResourceGroupName $workloadRg -Name $secondaryJob -ConfigurationTriggerType Schedule -ScheduleTriggerConfigCronExpression $scheduleCron -ScheduleTriggerConfigParallelism 1 -ScheduleTriggerConfigReplicaCompletionCount 1 -ConfigurationReplicaTimeout 3600 -ConfigurationReplicaRetryLimit 2
-New-AzScheduledQueryRule -ResourceGroupName $workloadRg -Name "alert-replication-stale-primary-$suffix" -Location $primaryLocation -Scope $primaryWorkspaceId -Severity 2 -WindowSize ([TimeSpan]::FromMinutes($lagMinutes)) -EvaluationFrequency ([TimeSpan]::FromMinutes(10)) -CriterionAllOf $freshnessCondition -ActionGroupResourceId $actionGroupId -SkipQueryValidation -Enabled:$false -Tag $tags
-New-AzScheduledQueryRule -ResourceGroupName $workloadRg -Name "alert-replication-stale-secondary-$suffix" -Location $secondaryLocation -Scope $secondaryWorkspaceId -Severity 2 -WindowSize ([TimeSpan]::FromMinutes($lagMinutes)) -EvaluationFrequency ([TimeSpan]::FromMinutes(10)) -CriterionAllOf $freshnessCondition -ActionGroupResourceId $actionGroupId -SkipQueryValidation -Enabled -Tag $tags
+New-AzScheduledQueryRule -ResourceGroupName $workloadRg -Name "alert-replication-stale-primary-$suffix" -Location $primaryLocation -Scope $primaryWorkspaceId -Severity 2 -WindowSize ([TimeSpan]::FromMinutes($lagMinutes)) -EvaluationFrequency ([TimeSpan]::FromMinutes(10)) -CriterionAllOf $freshnessConditions[$primaryJob] -ActionGroupResourceId $actionGroupId -SkipQueryValidation -Enabled:$false -Tag $tags
+New-AzScheduledQueryRule -ResourceGroupName $workloadRg -Name "alert-replication-stale-secondary-$suffix" -Location $secondaryLocation -Scope $secondaryWorkspaceId -Severity 2 -WindowSize ([TimeSpan]::FromMinutes($lagMinutes)) -EvaluationFrequency ([TimeSpan]::FromMinutes(10)) -CriterionAllOf $freshnessConditions[$secondaryJob] -ActionGroupResourceId $actionGroupId -SkipQueryValidation -Enabled -Tag $tags
 ```
 
 </details>

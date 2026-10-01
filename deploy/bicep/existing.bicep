@@ -274,6 +274,13 @@ param replicationLagThresholdMinutes int = 30
 @description('Creates and enables Azure Monitor alerting resources when true.')
 param monitoringEnabled bool = true
 
+// Log Analytics workspaces for the job logs. Reuse existing ones, for example when Azure Policy blocks new workspaces.
+@description('Resource ID of an existing Log Analytics workspace for the primary job logs, in any resource group or subscription. Empty creates a workspace. The deploying identity needs Microsoft.OperationalInsights/workspaces/sharedKeys/action on it.')
+param primaryLogWorkspaceId string = ''
+
+@description('Resource ID of an existing Log Analytics workspace for the secondary job logs. It can be the same workspace as primaryLogWorkspaceId. Empty creates a workspace.')
+param secondaryLogWorkspaceId string = ''
+
 param tags object = {
   Environment: environmentName
   Workload: 'azure-files-dr-replication'
@@ -301,6 +308,10 @@ var identityIdPrefix = toLower('/subscriptions/${subscription().subscriptionId}/
 var identityIdType = '/providers/microsoft.managedidentity/userassignedidentities/'
 var primaryIdentityIdValid = length(split(primaryIdentityId, '/')) == 9 && startsWith(toLower(primaryIdentityId), identityIdPrefix) && contains(toLower(primaryIdentityId), identityIdType)
 var secondaryIdentityIdValid = length(split(secondaryIdentityId, '/')) == 9 && startsWith(toLower(secondaryIdentityId), identityIdPrefix) && contains(toLower(secondaryIdentityId), identityIdType)
+// Workspaces can be in any subscription, so only the shape of their IDs is checked.
+var logWorkspaceIdPattern = '/providers/microsoft.operationalinsights/workspaces/'
+var primaryLogWorkspaceIdValid = length(split(primaryLogWorkspaceId, '/')) == 9 && startsWith(toLower(primaryLogWorkspaceId), '/subscriptions/') && contains(toLower(primaryLogWorkspaceId), logWorkspaceIdPattern)
+var secondaryLogWorkspaceIdValid = length(split(secondaryLogWorkspaceId, '/')) == 9 && startsWith(toLower(secondaryLogWorkspaceId), '/subscriptions/') && contains(toLower(secondaryLogWorkspaceId), logWorkspaceIdPattern)
 
 // Missing inputs stop the deployment during validation, before any resource changes.
 var inputErrors = filter([
@@ -321,6 +332,10 @@ var inputErrors = filter([
   identityMode == 'existing' && (empty(primaryIdentityId) || empty(secondaryIdentityId)) ? 'identityMode is existing, so set primaryIdentityId and secondaryIdentityId.' : ''
   identityMode == 'existing' && !empty(primaryIdentityId) && !primaryIdentityIdValid ? 'primaryIdentityId must be the resource ID of a user-assigned managed identity in the deployment subscription.' : ''
   identityMode == 'existing' && !empty(secondaryIdentityId) && !secondaryIdentityIdValid ? 'secondaryIdentityId must be the resource ID of a user-assigned managed identity in the deployment subscription.' : ''
+  !empty(primaryLogWorkspaceId) && !primaryLogWorkspaceIdValid ? 'primaryLogWorkspaceId must be the resource ID of a Log Analytics workspace.' : ''
+  !empty(secondaryLogWorkspaceId) && !secondaryLogWorkspaceIdValid ? 'secondaryLogWorkspaceId must be the resource ID of a Log Analytics workspace.' : ''
+  !empty(primaryLogWorkspaceId) && !empty(resourceNames.?primaryLogWorkspace ?? '') ? 'primaryLogWorkspaceId reuses a workspace, so remove resourceNames.primaryLogWorkspace, which names a new one.' : ''
+  !empty(secondaryLogWorkspaceId) && !empty(resourceNames.?secondaryLogWorkspace ?? '') ? 'secondaryLogWorkspaceId reuses a workspace, so remove resourceNames.secondaryLogWorkspace, which names a new one.' : ''
 ], inputError => !empty(inputError))
 var validatedTags = empty(inputErrors) ? tags : fail(join(inputErrors, ' '))
 
@@ -688,6 +703,7 @@ module primaryRegion 'modules/replication-region.bicep' = {
     location: primaryLocation
     regionCode: primaryRegionCode
     logWorkspaceName: resourceNames.?primaryLogWorkspace ?? ''
+    existingLogWorkspaceId: primaryLogWorkspaceIdValid ? primaryLogWorkspaceId : ''
     managedEnvironmentName: resourceNames.?primaryEnvironment ?? ''
     jobName: resourceNames.?primaryJob ?? ''
     infrastructureSubnetId: primaryInfrastructureSubnetId
@@ -719,6 +735,7 @@ module secondaryRegion 'modules/replication-region.bicep' = {
     location: secondaryLocation
     regionCode: secondaryRegionCode
     logWorkspaceName: resourceNames.?secondaryLogWorkspace ?? ''
+    existingLogWorkspaceId: secondaryLogWorkspaceIdValid ? secondaryLogWorkspaceId : ''
     managedEnvironmentName: resourceNames.?secondaryEnvironment ?? ''
     jobName: resourceNames.?secondaryJob ?? ''
     infrastructureSubnetId: secondaryInfrastructureSubnetId
@@ -756,6 +773,8 @@ module monitoring 'modules/monitoring.bicep' = {
     secondaryJobName: secondaryRegion.outputs.jobName
     primaryLogWorkspaceId: primaryRegion.outputs.logWorkspaceId
     secondaryLogWorkspaceId: secondaryRegion.outputs.logWorkspaceId
+    primaryLogWorkspaceLocation: primaryRegion.outputs.logWorkspaceLocation
+    secondaryLogWorkspaceLocation: secondaryRegion.outputs.logWorkspaceLocation
     alertEmailAddresses: alertEmailAddresses
     replicationLagThresholdMinutes: replicationLagThresholdMinutes
     monitoringEnabled: monitoringEnabled
@@ -780,6 +799,8 @@ output primaryFileShareName string = primaryShareName
 output secondaryFileShareName string = secondaryShareName
 output primaryLogWorkspaceName string = primaryRegion.outputs.logWorkspaceName
 output secondaryLogWorkspaceName string = secondaryRegion.outputs.logWorkspaceName
+output primaryLogWorkspaceId string = primaryRegion.outputs.logWorkspaceId
+output secondaryLogWorkspaceId string = secondaryRegion.outputs.logWorkspaceId
 output referencedPrivateEndpointIds array = existingPrivateEndpointIds
 output monitoringActionGroupId string = monitoring.outputs.actionGroupId
 output primaryFailureAlertId string = monitoring.outputs.primaryFailureAlertId

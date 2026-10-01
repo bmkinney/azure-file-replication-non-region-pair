@@ -154,7 +154,7 @@ Destination deletion is disabled. The initial rollout prioritizes recoverability
 Job failure and replication freshness are separate signals:
 
 - Each Container Apps Job has a Sev 1 metric alert over the native `Executions` metric filtered to `state=Failed`. Both rules remain enabled so a failed manual execution in the standby region is observable.
-- Each Log Analytics workspace has a Sev 2 scheduled query rule that runs every 10 minutes and searches the configured 20-, 30-, or 60-minute window for `AZURE_FILES_REPLICATION_SUCCEEDED`. A single evaluation with no success marker triggers the alert.
+- Each job's Log Analytics workspace has a Sev 2 scheduled query rule that runs every 10 minutes and searches the configured 20-, 30-, or 60-minute window for `AZURE_FILES_REPLICATION_SUCCEEDED` from that job. A single evaluation with no success marker triggers the alert. The Bicep existing-resource profile can reuse existing workspaces, such as a central workspace that both jobs share; the rule then runs in the workspace's region.
 - The freshness query embeds the deployment time and treats the active direction as fresh until one lag threshold after it, so a newly activated direction has time to run and ingest its first success. Any redeployment delays stale detection by at most one threshold.
 - Scheduled-query validation is skipped when the alert resources are created because a new workspace does not contain `ContainerAppConsoleLogs_CL` until its first Container Apps log ingestion. Runtime evaluation uses the table normally after it is materialized.
 - Freshness represents elapsed time since the last completed successful AzCopy run. It does not compare individual file timestamps or guarantee a per-file RPO.

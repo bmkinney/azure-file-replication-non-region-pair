@@ -7,14 +7,18 @@ resource "time_static" "freshness_grace_start" {
 
 locals {
   lag_window_size = "PT${var.replication_lag_threshold_minutes}M"
-  freshness_query = <<-KQL
+  # Each rule counts only its own job's successes, so both regions can share one workspace.
+  freshness_queries = {
+    for role, job_name in { primary = var.primary_job_name, secondary = var.secondary_job_name } : role => <<-KQL
   let graceEndsAt = datetime(${time_static.freshness_grace_start.rfc3339}) + ${var.replication_lag_threshold_minutes}m;
   ContainerAppConsoleLogs_CL
   | where TimeGenerated >= ago(${var.replication_lag_threshold_minutes}m)
+  | where ContainerJobName_s == "${job_name}"
   | where Log_s contains "AZURE_FILES_REPLICATION_SUCCEEDED"
   | summarize SuccessCount = count()
   | extend SuccessCount = iff(now() < graceEndsAt, max_of(SuccessCount, 1), SuccessCount)
   KQL
+  }
 }
 
 resource "azurerm_monitor_action_group" "replication" {
@@ -118,7 +122,7 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "primary_freshness" {
   tags                             = var.tags
 
   criteria {
-    query                   = local.freshness_query
+    query                   = local.freshness_queries["primary"]
     time_aggregation_method = "Maximum"
     metric_measure_column   = "SuccessCount"
     operator                = "LessThan"
@@ -151,7 +155,7 @@ resource "azurerm_monitor_scheduled_query_rules_alert_v2" "secondary_freshness" 
   tags                             = var.tags
 
   criteria {
-    query                   = local.freshness_query
+    query                   = local.freshness_queries["secondary"]
     time_aggregation_method = "Maximum"
     metric_measure_column   = "SuccessCount"
     operator                = "LessThan"

@@ -27,6 +27,21 @@ function Get-RoleAssignmentHint([string]$ErrorText) {
     return "`n`nThe signed-in identity isn't allowed to create role assignments at:`n$scopeList`nThe deployment assigns AcrPull on the registry and Storage File Data Privileged Contributor on the file storage accounts to the replication job identities. Grant Role Based Access Control Administrator, which can be limited to those two roles, or User Access Administrator or Owner, at these scopes or above. Activate the role first if it's eligible through Privileged Identity Management. After a few minutes, rerun this script; the deployment reuses the resources it already created. Alternatively, set createRoleAssignments = false in the parameter file, so that the deployment doesn't create role assignments and an administrator grants them once with scripts/grant-access.ps1. See 'RBAC requirements' in the README."
 }
 
+function Get-PolicyHint([string]$ErrorText) {
+    # Policy denials are reported per resource, in JSON whose quotes may be escaped, inside the deployment error.
+    $flatText = [regex]::Replace($ErrorText, '\s*\r?\n[ \t]*(\|[ \t]?)?', ' ') -replace '\\"', '"'
+    if ($flatText -notmatch 'RequestDisallowedByPolicy') {
+        return ''
+    }
+    $policies = @([regex]::Matches($flatText, '"policyDefinitionDisplayName"\s*:\s*"([^"]+)"') | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique)
+    $policyList = if ($policies.Count -gt 0) { " ($($policies -join '; '))" } else { '' }
+    $hint = "`n`nAzure Policy denied resources that the deployment creates$policyList. The error lists each policy assignment and the resource it denied."
+    if ($flatText -match '"expressionValue"\s*:\s*"Microsoft\.OperationalInsights/workspaces"') {
+        $hint += " A policy blocks new Log Analytics workspaces. With the existing-resource profile, set primaryLogWorkspaceId and secondaryLogWorkspaceId in the parameter file to existing workspaces, such as a central workspace; the deploying identity needs Log Analytics Contributor on them. See 'Use existing Log Analytics workspaces' in deploy/bicep/README.md."
+    }
+    return "$hint Alternatively, ask the policy owner for an exemption on the replication resource groups. Then rerun this script; the deployment reuses the resources it already created."
+}
+
 function Get-OutputValue($Deployment, [string]$Name) {
     # Deployments of earlier template versions lack newer outputs.
     $output = $Deployment.properties.outputs.PSObject.Properties[$Name]
@@ -53,7 +68,7 @@ function Invoke-AzCli {
     }
 
     if ($exitCode -ne 0) {
-        throw "az $($Arguments -join ' ') failed:`n$errorOutput`n$($output -join [Environment]::NewLine)$(Get-RoleAssignmentHint $errorOutput)"
+        throw "az $($Arguments -join ' ') failed:`n$errorOutput`n$($output -join [Environment]::NewLine)$(Get-RoleAssignmentHint $errorOutput)$(Get-PolicyHint $errorOutput)"
     }
     return ($output -join [Environment]::NewLine)
 }

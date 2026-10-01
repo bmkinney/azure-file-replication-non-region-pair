@@ -292,6 +292,27 @@ try {
     $identityRow = @($report.Prerequisites | Where-Object Item -eq 'secondary job identity id-replication-sec')
     Assert-True ($identityRow.Count -eq 1 -and $identityRow[0].Status -eq 'Action required' -and $identityRow[0].Detail -like '*Managed Identity Operator*') "a reused identity that can't be assigned was not flagged: $($identityRow | ConvertTo-Json -Compress)"
 
+    # Reused Log Analytics workspaces, for example when Azure Policy blocks new ones, can be in another subscription and
+    # region. The deployment reads their shared keys, so the deploying identity needs sharedKeys/action on them.
+    $workspaceRoot = '/subscriptions/44444444-4444-4444-4444-444444444444/resourceGroups/rg-central-logs/providers/Microsoft.OperationalInsights/workspaces'
+    $workspaceRules = @(
+        (New-Rule "resource show --ids $workspaceRoot/log-central *" @{ name = 'log-central'; location = 'centralus' }),
+        (New-Rule "resource show --ids $workspaceRoot/log-readonly *" @{ name = 'log-readonly'; location = 'centralus' }),
+        (New-Rule "resource show --ids $workspaceRoot/log-missing *" "ERROR: (ResourceNotFound) The Resource 'Microsoft.OperationalInsights/workspaces/log-missing' under resource group 'rg-central-logs' was not found." 3),
+        (New-Rule 'rest --method get --url */workspaces/log-readonly/providers/Microsoft.Authorization/permissions *' @{ value = @(@{ actions = @('*/read'); notActions = @() }) })
+    )
+    $fakeAzRules = $workspaceRules + $commonRules + (Get-ExistingRules -PrimaryEndpoints @('pe-primary-file-a', 'pe-primary-file-b') -SecondaryEndpoints @('pe-secondary-file-a', 'pe-secondary-file-b'))
+    $report = Invoke-Inventory $parametersFile @("primaryLogWorkspaceId=$workspaceRoot/log-central", "secondaryLogWorkspaceId=$workspaceRoot/log-readonly")
+    $workspaceRow = @($report.Prerequisites | Where-Object Item -eq 'primary log workspace log-central')
+    Assert-True ($workspaceRow.Count -eq 1 -and $workspaceRow[0].Status -eq 'Ready' -and $workspaceRow[0].Detail -like '*freshness alert is created in centralus*') "a reused workspace whose keys can be read was not accepted: $($workspaceRow | ConvertTo-Json -Compress)"
+    $workspaceRow = @($report.Prerequisites | Where-Object Item -eq 'secondary log workspace log-readonly')
+    Assert-True ($workspaceRow.Count -eq 1 -and $workspaceRow[0].Status -eq 'Action required' -and $workspaceRow[0].Detail -like '*Log Analytics Contributor*') "a reused workspace whose keys can't be read was not flagged: $($workspaceRow | ConvertTo-Json -Compress)"
+    Assert-True ($report.Summary.PrerequisitesActionRequired -eq 1) "unexpected action items with reused workspaces: $(@($report.Prerequisites | Where-Object Status -eq 'Action required' | ForEach-Object Item) -join '; ')"
+    $report = Invoke-Inventory $parametersFile @("primaryLogWorkspaceId=$workspaceRoot/log-missing")
+    $workspaceRow = @($report.Prerequisites | Where-Object Item -eq 'primary log workspace log-missing')
+    Assert-True ($workspaceRow.Count -eq 1 -and $workspaceRow[0].Status -eq 'Action required' -and $workspaceRow[0].Detail -like 'Not found.*') "a missing reused workspace was not flagged: $($workspaceRow | ConvertTo-Json -Compress)"
+    Assert-True (@($report.Prerequisites | Where-Object Item -like 'secondary log workspace*').Count -eq 0) 'a workspace check ran for a region that creates its workspace'
+
     $fakeAzRules = $commonRules + (Get-ExistingRules -PrimaryEndpoints @('pe-primary-file-a') -SecondaryEndpoints @('pe-secondary-file-b'))
     $report = Invoke-Inventory $parametersFile
     Assert-True ((Get-Status $report 'primary job copy path*') -contains 'Action required') 'a hub-only primary copy path was accepted'

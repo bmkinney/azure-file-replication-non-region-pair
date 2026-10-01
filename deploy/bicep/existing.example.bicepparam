@@ -124,3 +124,9 @@ param alertEmailAddresses = [
 ]
 param replicationLagThresholdMinutes = 30
 param monitoringEnabled = true
+
+// 9. Log Analytics. The deployment creates a workspace in each region for the job logs. Where Azure Policy blocks new
+// workspaces, for example to enforce central logging, reuse existing ones instead; both regions can share one. The
+// deploying identity needs Log Analytics Contributor, or Microsoft.OperationalInsights/workspaces/sharedKeys/action, on them.
+// param primaryLogWorkspaceId = '/subscriptions/<subscription-id>/resourceGroups/<logging-resource-group>/providers/Microsoft.OperationalInsights/workspaces/<workspace>'
+// param secondaryLogWorkspaceId = '/subscriptions/<subscription-id>/resourceGroups/<logging-resource-group>/providers/Microsoft.OperationalInsights/workspaces/<workspace>'

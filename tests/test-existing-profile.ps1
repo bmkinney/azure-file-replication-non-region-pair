@@ -108,6 +108,29 @@ foreach ($side in 'primary', 'secondary') {
     Assert-True ([string]$module.properties.parameters.existingIdentityId -eq "[if(equals(parameters('identityMode'), 'existing'), createObject('value', parameters('${side}IdentityId')), createObject('value', ''))]") "${side}Identity doesn't reuse ${side}IdentityId in existing mode"
 }
 
+# Each region reuses its Log Analytics workspace when an ID is given, for example when Azure Policy blocks new workspaces,
+# and creates one otherwise. The freshness rules follow the workspace, wherever it is.
+foreach ($side in 'primary', 'secondary') {
+    Assert-True ($template.parameters."${side}LogWorkspaceId".defaultValue -eq '') "${side}LogWorkspaceId must be optional"
+    $region = Get-Resource "${side}Region"
+    Assert-True ([string]$region.properties.parameters.existingLogWorkspaceId -eq "[if(variables('${side}LogWorkspaceIdValid'), createObject('value', parameters('${side}LogWorkspaceId')), createObject('value', ''))]") "${side}Region doesn't reuse a valid ${side}LogWorkspaceId"
+    Assert-True ([string]$template.outputs."${side}LogWorkspaceId".value -eq "[reference('${side}Region').outputs.logWorkspaceId.value]") "the template must output the $side workspace ID"
+}
+$monitoringParameters = (Get-Resource 'monitoring').properties.parameters
+foreach ($side in 'primary', 'secondary') {
+    Assert-True ([string]$monitoringParameters."${side}LogWorkspaceLocation".value -eq "[reference('${side}Region').outputs.logWorkspaceLocation.value]") "the $side freshness rule doesn't follow its workspace's region"
+}
+$regionJson = (& az bicep build --file (Join-Path $repositoryRoot 'deploy/bicep/modules/replication-region.bicep') --stdout) -join [Environment]::NewLine
+Assert-True ($LASTEXITCODE -eq 0) 'replication-region.bicep does not compile'
+$regionTemplate = $regionJson | ConvertFrom-Json -Depth 100
+$regionResources = if ($regionTemplate.resources -is [array]) { $regionTemplate.resources } else { @($regionTemplate.resources.PSObject.Properties.Value) }
+$createdWorkspaces = @($regionResources | Where-Object { $_.type -eq 'Microsoft.OperationalInsights/workspaces' -and -not $_.existing })
+Assert-True ($createdWorkspaces.Count -eq 1 -and [string]$createdWorkspaces[0].condition -eq "[not(variables('reusesLogWorkspace'))]") 'the region module must create a workspace only when it reuses none'
+$logConfiguration = @($regionResources | Where-Object { $_.type -eq 'Microsoft.App/managedEnvironments' })[0].properties.appLogsConfiguration.logAnalyticsConfiguration
+foreach ($property in 'customerId', 'sharedKey') {
+    Assert-True ([string]$logConfiguration.$property -match "^\[if\(variables\('reusesLogWorkspace'\), (reference|listKeys)\(extensionResourceId\(") "the environment's $property must come from the reused workspace when there is one"
+}
+
 # The output lists every assignment with the name its module gives it, so that scripts can check and create them.
 $listed = $template.outputs.jobRoleAssignments
 Assert-True ($listed.type -eq 'array' -and $listed.copy.count -eq '[length(range(0, 6))]') 'the template must output the six job role assignments'
@@ -149,6 +172,8 @@ Assert-True ($validation.Contains("parameters('primaryDnsResourceGroupName')") -
 Assert-True ($validation.Contains("parameters('primaryRegionCode')") -and $validation.Contains("parameters('secondaryRegionCode')")) 'identical region codes must be rejected'
 Assert-True ($validation.Contains('identityMode is existing, so set primaryIdentityId and secondaryIdentityId.')) 'reused identities without resource IDs must be rejected'
 Assert-True ($validation.Contains("variables('primaryIdentityIdValid')") -and $validation.Contains("variables('secondaryIdentityIdValid')")) 'identity IDs outside the deployment subscription must be rejected'
+Assert-True ($validation.Contains("variables('primaryLogWorkspaceIdValid')") -and $validation.Contains("variables('secondaryLogWorkspaceIdValid')")) 'malformed workspace IDs must be rejected'
+Assert-True ($validation.Contains('primaryLogWorkspaceId reuses a workspace, so remove resourceNames.primaryLogWorkspace')) 'a reused workspace with a name for a new one must be rejected'
 
 # Parameter files compile for the example and for single, per-region, and per-service layouts; unknown values are rejected.
 $workRoot = Join-Path ([IO.Path]::GetTempPath()) "existing-profile-test-$([guid]::NewGuid().ToString('N'))"
@@ -212,6 +237,9 @@ param secondaryIdentityId = '$identityRoot/id-replication-wus2'
 "@
     Assert-True (Test-Compiles 'pipeline' $pipeline) 'a parameter file with reused identities and separately granted roles does not compile'
     Assert-True (-not (Test-Compiles 'unknown-identity-mode' "$base`nparam identityMode = 'shared'")) 'an unknown identityMode was accepted'
+
+    $workspaceId = '/subscriptions/11111111-1111-1111-1111-111111111111/resourceGroups/rg-central-logs/providers/Microsoft.OperationalInsights/workspaces/log-central'
+    Assert-True (Test-Compiles 'central-logs' "$base`nparam primaryLogWorkspaceId = '$workspaceId'`nparam secondaryLogWorkspaceId = '$workspaceId'") 'a parameter file that reuses one workspace for both regions does not compile'
 
     # The complete parameter files in deploy/bicep/README.md must compile, so the documented examples can't drift from the template.
     $readme = [IO.File]::ReadAllText((Join-Path $repositoryRoot 'deploy/bicep/README.md'))
