@@ -315,6 +315,8 @@ var secondaryLogWorkspaceIdParts = concat(split(secondaryLogWorkspaceId, '/'), [
 var logWorkspaceIdFormat = '/subscriptions/{0}/resourceGroups/{1}/providers/Microsoft.OperationalInsights/workspaces/{2}'
 var primaryLogWorkspaceIdValid = length(split(primaryLogWorkspaceId, '/')) == 9 && !empty(primaryLogWorkspaceIdParts[2]) && !empty(primaryLogWorkspaceIdParts[4]) && !empty(primaryLogWorkspaceIdParts[8]) && toLower(primaryLogWorkspaceId) == toLower(format(logWorkspaceIdFormat, primaryLogWorkspaceIdParts[2], primaryLogWorkspaceIdParts[4], primaryLogWorkspaceIdParts[8]))
 var secondaryLogWorkspaceIdValid = length(split(secondaryLogWorkspaceId, '/')) == 9 && !empty(secondaryLogWorkspaceIdParts[2]) && !empty(secondaryLogWorkspaceIdParts[4]) && !empty(secondaryLogWorkspaceIdParts[8]) && toLower(secondaryLogWorkspaceId) == toLower(format(logWorkspaceIdFormat, secondaryLogWorkspaceIdParts[2], secondaryLogWorkspaceIdParts[4], secondaryLogWorkspaceIdParts[8]))
+// Jobs whose logs go to separate workspaces can't be confused, whatever their names; the monitoring module also compares the resolved names.
+var sharesReusedLogWorkspace = primaryLogWorkspaceIdValid && secondaryLogWorkspaceIdValid && toLower(primaryLogWorkspaceId) == toLower(secondaryLogWorkspaceId)
 
 // Missing inputs stop the deployment during validation, before any resource changes.
 var inputErrors = filter([
@@ -339,7 +341,7 @@ var inputErrors = filter([
   !empty(secondaryLogWorkspaceId) && !secondaryLogWorkspaceIdValid ? 'secondaryLogWorkspaceId must be the resource ID of a Log Analytics workspace.' : ''
   !empty(primaryLogWorkspaceId) && !empty(resourceNames.?primaryLogWorkspace ?? '') ? 'primaryLogWorkspaceId reuses a workspace, so remove resourceNames.primaryLogWorkspace, which names a new one.' : ''
   !empty(secondaryLogWorkspaceId) && !empty(resourceNames.?secondaryLogWorkspace ?? '') ? 'secondaryLogWorkspaceId reuses a workspace, so remove resourceNames.secondaryLogWorkspace, which names a new one.' : ''
-  !empty(resourceNames.?primaryJob ?? '') && toLower(resourceNames.?primaryJob ?? '') == toLower(resourceNames.?secondaryJob ?? '') && toLower(resourceNames.?primaryEnvironment ?? '') == toLower(resourceNames.?secondaryEnvironment ?? '') && !empty(resourceNames.?primaryEnvironment ?? '') ? 'resourceNames gives both jobs the same job and environment names, which the freshness alerts use to tell the jobs\' logs apart. Change one of them.' : ''
+  sharesReusedLogWorkspace && !empty(resourceNames.?primaryJob ?? '') && !empty(resourceNames.?primaryEnvironment ?? '') && toLower(resourceNames.?primaryJob ?? '') == toLower(resourceNames.?secondaryJob ?? '') && toLower(resourceNames.?primaryEnvironment ?? '') == toLower(resourceNames.?secondaryEnvironment ?? '') ? 'Both jobs send logs to the same workspace, and resourceNames gives them the same environment and job names, which the freshness alerts use to tell their logs apart. Change one of the names, or use a workspace for each region.' : ''
 ], inputError => !empty(inputError))
 var validatedTags = empty(inputErrors) ? tags : fail(join(inputErrors, ' '))
 

@@ -58,4 +58,20 @@ foreach ($rule in $freshnessRules) {
     }
 }
 
+# In a shared workspace, the rules tell the jobs apart by their resolved names, so identical names must fail the
+# deployment before any alert exists. Jobs with separate workspaces can share names.
+$collision = [string]$template.variables.jobLogsCollide
+foreach ($pair in @('LogWorkspaceId', 'EnvironmentName', 'JobName')) {
+    if (-not $collision.Contains("equals(toLower(parameters('primary$pair')), toLower(parameters('secondary$pair')))")) {
+        throw "The log collision check does not compare the jobs' ${pair} values case-insensitively: $collision"
+    }
+}
+if (-not ([string]$template.variables.validatedTags).StartsWith("[if(variables('jobLogsCollide'), fail(")) {
+    throw 'The monitoring module does not fail when the jobs share a workspace and names.'
+}
+$untagged = @($template.resources | Where-Object { $_.tags -ne "[variables('validatedTags')]" })
+if ($untagged.Count -gt 0) {
+    throw "Alert resources that skip the log collision check: $(@($untagged | ForEach-Object type) -join ', ')"
+}
+
 Write-Host 'Monitoring template contract checks passed.'

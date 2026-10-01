@@ -52,6 +52,10 @@ param secondaryFreshnessAlertName string = ''
 param freshnessGraceStartTime string = utcNow('o')
 
 var monitoringToken = uniqueString(subscription().id, resourceGroup().id, environmentName)
+// A shared workspace holds both jobs' logs, so the freshness rules can tell them apart only by their resolved environment
+// and job names. Fail before any alert exists rather than let one direction's successes mask the other's staleness.
+var jobLogsCollide = toLower(primaryLogWorkspaceId) == toLower(secondaryLogWorkspaceId) && toLower(primaryEnvironmentName) == toLower(secondaryEnvironmentName) && toLower(primaryJobName) == toLower(secondaryJobName)
+var validatedTags = jobLogsCollide ? fail('Both jobs send logs to workspace ${primaryLogWorkspaceId} with the same environment name, ${primaryEnvironmentName}, and job name, ${primaryJobName}, so the freshness alerts can\'t tell their logs apart. Give the jobs different names in resourceNames, or use a workspace for each region.') : tags
 var resolvedActionGroupName = empty(actionGroupName) ? 'ag-replication-${monitoringToken}' : actionGroupName
 var lagWindowSize = 'PT${replicationLagThresholdMinutes}M'
 // Until one threshold after deployment, the active direction counts as fresh; activation otherwise alerts before the first run's logs arrive.
@@ -77,7 +81,7 @@ var emailReceivers = map(alertEmailAddresses, (emailAddress, index) => {
 resource replicationActionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
   name: resolvedActionGroupName
   location: 'global'
-  tags: tags
+  tags: validatedTags
   properties: {
     groupShortName: 'file-repl'
     enabled: monitoringEnabled
@@ -88,7 +92,7 @@ resource replicationActionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
 resource primaryFailureAlert 'Microsoft.Insights/metricAlerts@2026-01-01' = {
   name: empty(primaryFailureAlertName) ? 'alert-replication-failed-primary-${monitoringToken}' : primaryFailureAlertName
   location: 'global'
-  tags: tags
+  tags: validatedTags
   properties: {
     description: 'Azure Files replication job ${primaryJobName} failed in the primary region.'
     severity: 1
@@ -132,7 +136,7 @@ resource primaryFailureAlert 'Microsoft.Insights/metricAlerts@2026-01-01' = {
 resource secondaryFailureAlert 'Microsoft.Insights/metricAlerts@2026-01-01' = {
   name: empty(secondaryFailureAlertName) ? 'alert-replication-failed-secondary-${monitoringToken}' : secondaryFailureAlertName
   location: 'global'
-  tags: tags
+  tags: validatedTags
   properties: {
     description: 'Azure Files replication job ${secondaryJobName} failed in the secondary region.'
     severity: 1
@@ -176,7 +180,7 @@ resource secondaryFailureAlert 'Microsoft.Insights/metricAlerts@2026-01-01' = {
 resource primaryFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: empty(primaryFreshnessAlertName) ? 'alert-replication-stale-primary-${monitoringToken}' : primaryFreshnessAlertName
   location: primaryLogWorkspaceLocation
-  tags: tags
+  tags: validatedTags
   properties: {
     description: 'No successful primary-to-secondary Azure Files replication was recorded within the configured lag threshold.'
     severity: 2
@@ -211,7 +215,7 @@ resource primaryFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-0
 resource secondaryFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: empty(secondaryFreshnessAlertName) ? 'alert-replication-stale-secondary-${monitoringToken}' : secondaryFreshnessAlertName
   location: secondaryLogWorkspaceLocation
-  tags: tags
+  tags: validatedTags
   properties: {
     description: 'No successful secondary-to-primary Azure Files replication was recorded within the configured lag threshold.'
     severity: 2

@@ -178,7 +178,9 @@ Assert-True ($validation.Contains('identityMode is existing, so set primaryIdent
 Assert-True ($validation.Contains("variables('primaryIdentityIdValid')") -and $validation.Contains("variables('secondaryIdentityIdValid')")) 'identity IDs outside the deployment subscription must be rejected'
 Assert-True ($validation.Contains("variables('primaryLogWorkspaceIdValid')") -and $validation.Contains("variables('secondaryLogWorkspaceIdValid')")) 'malformed workspace IDs must be rejected'
 Assert-True ($validation.Contains('primaryLogWorkspaceId reuses a workspace, so remove resourceNames.primaryLogWorkspace')) 'a reused workspace with a name for a new one must be rejected'
-Assert-True ($validation.Contains('resourceNames gives both jobs the same job and environment names')) 'identical job and environment names for both jobs must be rejected'
+Assert-True ($validation.Contains("variables('sharesReusedLogWorkspace')") -and $validation.Contains('Both jobs send logs to the same workspace, and resourceNames gives them the same environment and job names')) 'identical custom job and environment names must be rejected when both jobs share a reused workspace'
+# Jobs with separate workspaces can share names, so the early check applies only to one reused workspace, compared case-insensitively.
+Assert-True ([string]$template.variables.sharesReusedLogWorkspace -eq "[and(and(variables('primaryLogWorkspaceIdValid'), variables('secondaryLogWorkspaceIdValid')), equals(toLower(parameters('primaryLogWorkspaceId')), toLower(parameters('secondaryLogWorkspaceId'))))]") "the name check must apply only when both jobs reuse the same workspace: $($template.variables.sharesReusedLogWorkspace)"
 
 # Parameter files compile for the example and for single, per-region, and per-service layouts; unknown values are rejected.
 $workRoot = Join-Path ([IO.Path]::GetTempPath()) "existing-profile-test-$([guid]::NewGuid().ToString('N'))"
