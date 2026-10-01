@@ -15,8 +15,16 @@ param primaryJobId string
 param primaryJobName string
 param secondaryJobId string
 param secondaryJobName string
+
+@description('Container Apps environments of the jobs. With the job names, they identify each job\'s console logs in a workspace that other jobs share.')
+param primaryEnvironmentName string
+param secondaryEnvironmentName string
 param primaryLogWorkspaceId string
 param secondaryLogWorkspaceId string
+
+@description('Region of each freshness rule. A reused workspace can be in another region than its job, so the rule follows the workspace.')
+param primaryLogWorkspaceLocation string = primaryLocation
+param secondaryLogWorkspaceLocation string = secondaryLocation
 
 @minLength(1)
 @description('Email addresses that receive replication alerts through Azure Monitor.')
@@ -44,17 +52,26 @@ param secondaryFreshnessAlertName string = ''
 param freshnessGraceStartTime string = utcNow('o')
 
 var monitoringToken = uniqueString(subscription().id, resourceGroup().id, environmentName)
+// A shared workspace holds both jobs' logs, so the freshness rules can tell them apart only by their resolved environment
+// and job names. Fail before any alert exists rather than let one direction's successes mask the other's staleness.
+var jobLogsCollide = toLower(primaryLogWorkspaceId) == toLower(secondaryLogWorkspaceId) && toLower(primaryEnvironmentName) == toLower(secondaryEnvironmentName) && toLower(primaryJobName) == toLower(secondaryJobName)
+var validatedTags = jobLogsCollide ? fail('Both jobs send logs to workspace ${primaryLogWorkspaceId} with the same environment name, ${primaryEnvironmentName}, and job name, ${primaryJobName}, so the freshness alerts can\'t tell their logs apart. Give the jobs different names in resourceNames, or use a workspace for each region.') : tags
 var resolvedActionGroupName = empty(actionGroupName) ? 'ag-replication-${monitoringToken}' : actionGroupName
 var lagWindowSize = 'PT${replicationLagThresholdMinutes}M'
 // Until one threshold after deployment, the active direction counts as fresh; activation otherwise alerts before the first run's logs arrive.
-var freshnessQuery = format('''
+// Each rule counts only its own job's successes, by environment and job name, so both regions can share one workspace
+// with each other and other workloads.
+var freshnessQueryTemplate = '''
   let graceEndsAt = datetime({1}) + {0}m;
   ContainerAppConsoleLogs_CL
   | where TimeGenerated >= ago({0}m)
+  | where EnvironmentName_s == "{3}" and ContainerJobName_s == "{2}"
   | where Log_s contains "AZURE_FILES_REPLICATION_SUCCEEDED"
   | summarize SuccessCount = count()
   | extend SuccessCount = iff(now() < graceEndsAt, max_of(SuccessCount, 1), SuccessCount)
-''', replicationLagThresholdMinutes, freshnessGraceStartTime)
+'''
+var primaryFreshnessQuery = format(freshnessQueryTemplate, replicationLagThresholdMinutes, freshnessGraceStartTime, primaryJobName, primaryEnvironmentName)
+var secondaryFreshnessQuery = format(freshnessQueryTemplate, replicationLagThresholdMinutes, freshnessGraceStartTime, secondaryJobName, secondaryEnvironmentName)
 var emailReceivers = map(alertEmailAddresses, (emailAddress, index) => {
   name: 'replication-email-${index + 1}'
   emailAddress: emailAddress
@@ -64,7 +81,7 @@ var emailReceivers = map(alertEmailAddresses, (emailAddress, index) => {
 resource replicationActionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
   name: resolvedActionGroupName
   location: 'global'
-  tags: tags
+  tags: validatedTags
   properties: {
     groupShortName: 'file-repl'
     enabled: monitoringEnabled
@@ -75,7 +92,7 @@ resource replicationActionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
 resource primaryFailureAlert 'Microsoft.Insights/metricAlerts@2026-01-01' = {
   name: empty(primaryFailureAlertName) ? 'alert-replication-failed-primary-${monitoringToken}' : primaryFailureAlertName
   location: 'global'
-  tags: tags
+  tags: validatedTags
   properties: {
     description: 'Azure Files replication job ${primaryJobName} failed in the primary region.'
     severity: 1
@@ -119,7 +136,7 @@ resource primaryFailureAlert 'Microsoft.Insights/metricAlerts@2026-01-01' = {
 resource secondaryFailureAlert 'Microsoft.Insights/metricAlerts@2026-01-01' = {
   name: empty(secondaryFailureAlertName) ? 'alert-replication-failed-secondary-${monitoringToken}' : secondaryFailureAlertName
   location: 'global'
-  tags: tags
+  tags: validatedTags
   properties: {
     description: 'Azure Files replication job ${secondaryJobName} failed in the secondary region.'
     severity: 1
@@ -162,8 +179,8 @@ resource secondaryFailureAlert 'Microsoft.Insights/metricAlerts@2026-01-01' = {
 
 resource primaryFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: empty(primaryFreshnessAlertName) ? 'alert-replication-stale-primary-${monitoringToken}' : primaryFreshnessAlertName
-  location: primaryLocation
-  tags: tags
+  location: primaryLogWorkspaceLocation
+  tags: validatedTags
   properties: {
     description: 'No successful primary-to-secondary Azure Files replication was recorded within the configured lag threshold.'
     severity: 2
@@ -177,7 +194,7 @@ resource primaryFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-0
     criteria: {
       allOf: [
         {
-          query: freshnessQuery
+          query: primaryFreshnessQuery
           timeAggregation: 'Maximum'
           metricMeasureColumn: 'SuccessCount'
           operator: 'LessThan'
@@ -197,8 +214,8 @@ resource primaryFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-0
 
 resource secondaryFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2026-03-01' = {
   name: empty(secondaryFreshnessAlertName) ? 'alert-replication-stale-secondary-${monitoringToken}' : secondaryFreshnessAlertName
-  location: secondaryLocation
-  tags: tags
+  location: secondaryLogWorkspaceLocation
+  tags: validatedTags
   properties: {
     description: 'No successful secondary-to-primary Azure Files replication was recorded within the configured lag threshold.'
     severity: 2
@@ -212,7 +229,7 @@ resource secondaryFreshnessAlert 'Microsoft.Insights/scheduledQueryRules@2026-03
     criteria: {
       allOf: [
         {
-          query: freshnessQuery
+          query: secondaryFreshnessQuery
           timeAggregation: 'Maximum'
           metricMeasureColumn: 'SuccessCount'
           operator: 'LessThan'

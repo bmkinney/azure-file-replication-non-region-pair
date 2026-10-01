@@ -874,6 +874,34 @@ if ($isExistingProfile -and -not $hasPlaceholders) {
         }
     }
 
+    # Reused Log Analytics workspaces must exist, and the deployment reads their properties and shared keys for the Container Apps environments.
+    foreach ($role in 'primary', 'secondary') {
+        $workspaceId = [string](Get-ParameterValue "${role}LogWorkspaceId")
+        if (-not $workspaceId) {
+            continue
+        }
+        if ($workspaceId -notmatch '^/subscriptions/[^/]+/resourceGroups/[^/]+/providers/Microsoft\.OperationalInsights/workspaces/[^/]+$') {
+            Add-Prerequisite -Area 'Monitoring' -Item "$role log workspace" -Status 'Action required' -Detail "${role}LogWorkspaceId must be the resource ID of a Log Analytics workspace: /subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.OperationalInsights/workspaces/<workspace>."
+            continue
+        }
+        $item = "$role log workspace $(Split-Path $workspaceId -Leaf)"
+        $workspace = Invoke-Az -Arguments @('resource', 'show', '--ids', $workspaceId)
+        if (-not $workspace.Succeeded) {
+            Add-LookupFailure -Area 'Monitoring' -Item $item -Result $workspace -MissingDetail "Not found. Correct ${role}LogWorkspaceId, or remove it so that the deployment creates a workspace."
+            continue
+        }
+        # Reading the workspace here needs Microsoft.OperationalInsights/workspaces/read, which the deployment also needs.
+        $workspaceLocation = [string](Get-Property $workspace.Value 'location')
+        $keys = Test-Permission $workspaceId 'Microsoft.OperationalInsights/workspaces/sharedKeys/action'
+        if ($null -eq $keys.Allowed) {
+            Add-Prerequisite -Area 'Monitoring' -Item $item -Status 'Not verified' -Detail "Exists in $workspaceLocation. Could not read the signed-in identity's permissions on it. $($keys.Error)"
+        } elseif ($keys.Allowed) {
+            Add-Prerequisite -Area 'Monitoring' -Item $item -Status 'Ready' -Detail "Exists in $workspaceLocation, and the signed-in identity can read it and the shared key that the $role Container Apps environment sends logs with. The $role freshness alert is created in $workspaceLocation."
+        } else {
+            Add-Prerequisite -Area 'Monitoring' -Item $item -Status 'Action required' -Detail "Exists, but the signed-in identity can't read its shared keys, which the $role Container Apps environment needs. Grant Log Analytics Contributor on the workspace, which includes reading it and its keys."
+        }
+    }
+
     $zones = Invoke-Az -Arguments @('network', 'private-dns', 'zone', 'list')
     $fileZones = @($zones.Value | Where-Object { (Get-Property $_ 'name') -eq $fileZoneName })
     $registryEndpoints = if ($registry) { @(Get-ApprovedEndpoints $registry 'registry') } else { @() }

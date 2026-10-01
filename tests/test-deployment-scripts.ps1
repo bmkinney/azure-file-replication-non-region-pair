@@ -205,6 +205,24 @@ try {
     Assert-True ($hintScopes.Count -eq 2 -and $hintScopes -contains $storageScope -and $hintScopes -contains $registryScope) "deploy.ps1 did not list each refused scope once: $($hintScopes -join '; ')"
     Assert-True ($failure.Contains('reuses the resources it already created')) 'deploy.ps1 did not say that a rerun is safe'
     Assert-True (@($azCalls | Where-Object { $_ -like 'deployment sub create*' }).Count -eq 1 -and @($azCalls | Where-Object { $_ -like 'acr *' }).Count -eq 0) 'deploy.ps1 continued after the bootstrap deployment failed'
+    Assert-True (-not $failure.Contains('Azure Policy denied')) 'deploy.ps1 reported a policy denial for refused role assignments'
+
+    # A policy that blocks new Log Analytics workspaces: the error names the policy, and the hint points to reusing workspaces.
+    $policyInfo = '{\"type\":\"PolicyViolation\",\"info\":{\"evaluationDetails\":{\"evaluatedExpressions\":[{\"result\":\"True\",\"expressionKind\":\"Field\",\"expression\":\"type\",\"path\":\"type\",\"expressionValue\":\"Microsoft.OperationalInsights/workspaces\",\"targetValue\":\"Microsoft.OperationalInsights/workspaces\",\"operator\":\"Equals\"}]},\"policyDefinitionDisplayName\":\"Block Creation of Log Analytics Workspaces\",\"policyDefinitionEffect\":\"deny\"}}'
+    $denied = "ERROR: {`"status`":`"Failed`",`"error`":{`"code`":`"DeploymentFailed`",`"details`":[{`"code`":`"InvalidTemplateDeployment`",`"details`":[{`"code`":`"RequestDisallowedByPolicy`",`"target`":`"log-replication-pri-test`",`"message`":`"Resource 'log-replication-pri-test' was disallowed by policy.`",`"additionalInfo`":[$($policyInfo -replace '\\"', '"')]}]}]}}"
+    $fakeAzRules = $commonRules + @(
+        (New-Rule 'deployment sub validate*' '{}')
+        (New-Rule 'deployment sub create*' $denied 1)
+    )
+    $failure = $null
+    try {
+        Invoke-WithIsolatedTemp { & $deployScript -ParametersFile $parametersFile -SkipWhatIf -Confirm:$false 6> $null 2> $null }
+    } catch {
+        $failure = $_.Exception.Message
+    }
+    Assert-True ($null -ne $failure -and $failure.Contains('Azure Policy denied resources that the deployment creates (Block Creation of Log Analytics Workspaces)')) "deploy.ps1 did not explain the policy denial: $failure"
+    Assert-True ($failure.Contains('set primaryLogWorkspaceId and secondaryLogWorkspaceId')) 'deploy.ps1 did not point to reusing Log Analytics workspaces'
+    Assert-True (-not $failure.Contains("isn't allowed to create role assignments")) 'deploy.ps1 reported refused role assignments for a policy denial'
 
     $fakeAzRules = @(
         (New-Rule 'containerapp job list*' (ConvertTo-Json -InputObject $jobs -Depth 5 -Compress))

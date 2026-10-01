@@ -10,6 +10,9 @@ param logWorkspaceName string = ''
 param managedEnvironmentName string = ''
 param jobName string = ''
 
+@description('Resource ID of an existing Log Analytics workspace to send the job logs to, in any resource group or subscription. Empty creates a workspace in this resource group.')
+param existingLogWorkspaceId string = ''
+
 param infrastructureSubnetId string
 param identityId string
 param identityClientId string
@@ -33,8 +36,12 @@ var registries = [
     identity: identityId
   }
 ]
+var reusesLogWorkspace = !empty(existingLogWorkspaceId)
+// /subscriptions/<subscription>/resourceGroups/<group>/providers/Microsoft.OperationalInsights/workspaces/<name>; the
+// placeholder keeps the reference well formed when no workspace is reused.
+var existingLogWorkspaceSegments = split(reusesLogWorkspace ? existingLogWorkspaceId : '/subscriptions/${subscription().subscriptionId}/resourceGroups/${resourceGroup().name}/providers/Microsoft.OperationalInsights/workspaces/unused', '/')
 
-resource logWorkspace 'Microsoft.OperationalInsights/workspaces@2025-02-01' = {
+resource logWorkspace 'Microsoft.OperationalInsights/workspaces@2025-02-01' = if (!reusesLogWorkspace) {
   name: empty(logWorkspaceName) ? 'log-replication-${regionCode}-${token}' : logWorkspaceName
   location: location
   tags: tags
@@ -45,6 +52,11 @@ resource logWorkspace 'Microsoft.OperationalInsights/workspaces@2025-02-01' = {
   }
 }
 
+resource existingLogWorkspace 'Microsoft.OperationalInsights/workspaces@2025-02-01' existing = if (reusesLogWorkspace) {
+  name: existingLogWorkspaceSegments[8]
+  scope: resourceGroup(existingLogWorkspaceSegments[2], existingLogWorkspaceSegments[4])
+}
+
 resource managedEnvironment 'Microsoft.App/managedEnvironments@2025-01-01' = {
   name: empty(managedEnvironmentName) ? 'cae-replication-${regionCode}-${token}' : managedEnvironmentName
   location: location
@@ -53,8 +65,9 @@ resource managedEnvironment 'Microsoft.App/managedEnvironments@2025-01-01' = {
     appLogsConfiguration: {
       destination: 'log-analytics'
       logAnalyticsConfiguration: {
-        customerId: logWorkspace.properties.customerId
-        sharedKey: logWorkspace.listKeys().primarySharedKey
+        // Resource Manager evaluates only the taken branch of a condition, so only one workspace's keys are read.
+        customerId: reusesLogWorkspace ? existingLogWorkspace!.properties.customerId : logWorkspace!.properties.customerId
+        sharedKey: reusesLogWorkspace ? existingLogWorkspace!.listKeys().primarySharedKey : logWorkspace!.listKeys().primarySharedKey
       }
     }
     vnetConfiguration: {
@@ -122,5 +135,8 @@ resource job 'Microsoft.App/jobs@2025-01-01' = {
 
 output jobId string = job.id
 output jobName string = job.name
-output logWorkspaceId string = logWorkspace.id
-output logWorkspaceName string = logWorkspace.name
+output environmentName string = managedEnvironment.name
+output logWorkspaceId string = reusesLogWorkspace ? existingLogWorkspaceId : logWorkspace.id
+output logWorkspaceName string = reusesLogWorkspace ? existingLogWorkspaceSegments[8] : logWorkspace.name
+output logWorkspaceLocation string = reusesLogWorkspace ? existingLogWorkspace!.location : location
+output logWorkspaceCreated bool = !reusesLogWorkspace

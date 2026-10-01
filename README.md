@@ -337,7 +337,7 @@ With separately granted roles, the deploying identity needs no right to assign r
 
 ### Deploying identity that assigns the roles
 
-With `createRoleAssignments = true`, the identity running the deployment must be able to create the subscription- and resource-group-scoped resources, attach the managed identities to the jobs, and create the role assignments above. The straightforward assignment is **Owner** at the subscription. A more separated configuration is **Contributor** plus **Role Based Access Control Administrator** at the subscription, or equivalent custom roles containing the required resource writes, `Microsoft.ManagedIdentity/userAssignedIdentities/assign/action`, and `Microsoft.Authorization/roleAssignments/write`. For the existing-resource profile, those permissions must include every resource group that the deployment places resources in, and each storage account and registry that it reuses. All reused resources must be in the deployment subscription; only the private DNS zones named by zone ID can be in another subscription. Creating services and endpoints needs the [additional rights](deploy/bicep/README.md#reuse-or-create-each-service) listed with the modes.
+With `createRoleAssignments = true`, the identity running the deployment must be able to create the subscription- and resource-group-scoped resources, attach the managed identities to the jobs, and create the role assignments above. The straightforward assignment is **Owner** at the subscription. A more separated configuration is **Contributor** plus **Role Based Access Control Administrator** at the subscription, or equivalent custom roles containing the required resource writes, `Microsoft.ManagedIdentity/userAssignedIdentities/assign/action`, and `Microsoft.Authorization/roleAssignments/write`. For the existing-resource profile, those permissions must include every resource group that the deployment places resources in, and each storage account and registry that it reuses. All reused resources must be in the deployment subscription, except the private DNS zones named by zone ID and reused Log Analytics workspaces, which can be in another subscription. Creating services and endpoints needs the [additional rights](deploy/bicep/README.md#reuse-or-create-each-service) listed with the modes.
 
 To delegate only these assignments, an Owner or User Access Administrator can assign **Role Based Access Control Administrator** with a condition that allows it to assign just AcrPull and Storage File Data Privileged Contributor, and only to service principals such as the job identities. Assign it on each storage account and the registry, or on their resource groups. The templates declare `principalType: 'ServicePrincipal'` on every assignment, which the condition requires.
 
@@ -364,6 +364,7 @@ With `createRoleAssignments = false`, the deploying identity needs no right to a
 | Private DNS zones that receive records | Adding the records of new endpoints | Private DNS Zone Contributor |
 | Reused storage accounts and registries that get new endpoints | Approving the endpoints: `privateEndpointConnectionsApproval/action` | Contributor on the resource |
 | Reused job identities | Attaching them to the jobs: `Microsoft.ManagedIdentity/userAssignedIdentities/assign/action` | Managed Identity Operator |
+| Reused Log Analytics workspaces | Reading the workspace and the shared key that the Container Apps environments send logs with: `Microsoft.OperationalInsights/workspaces/read` and `Microsoft.OperationalInsights/workspaces/sharedKeys/action`. Reader on the deployment subscription doesn't cover a workspace in another subscription. | Log Analytics Contributor |
 | The registry, when `deploy.ps1` builds the image | Queuing the build, pushing, and reading the manifest | Container Registry Tasks Contributor plus AcrPush, or Container Registry Repository Writer instead of AcrPush for an ABAC registry. Contributor on a registry that the templates create covers both. |
 
 A custom role for the subscription deployments:
@@ -472,12 +473,12 @@ Both deployment profiles create the following stateful Azure Monitor rules:
 | --- | --- | --- | --- |
 | Primary job failed | Sev 1 | `Microsoft.App/jobs` `Executions` metric with `state=Failed` | Always when monitoring is enabled |
 | Secondary job failed | Sev 1 | `Microsoft.App/jobs` `Executions` metric with `state=Failed` | Always when monitoring is enabled |
-| Primary replication stale | Sev 2 | No `AZURE_FILES_REPLICATION_SUCCEEDED` console marker for the configured threshold | Only when `activeRegion=primary` |
-| Secondary replication stale | Sev 2 | No `AZURE_FILES_REPLICATION_SUCCEEDED` console marker for the configured threshold | Only when `activeRegion=secondary` |
+| Primary replication stale | Sev 2 | No `AZURE_FILES_REPLICATION_SUCCEEDED` console marker from the primary job for the configured threshold | Only when `activeRegion=primary` |
+| Secondary replication stale | Sev 2 | No `AZURE_FILES_REPLICATION_SUCCEEDED` console marker from the secondary job for the configured threshold | Only when `activeRegion=secondary` |
 
 Failed-execution alerts cover scheduled and manually started jobs, including failures where the AzCopy wrapper cannot emit an error marker. Freshness is an operational RPO signal: it measures time since a completed successful AzCopy run, not the age or equality of every file. With `activeRegion=none`, both freshness rules are disabled so bootstrap and planned pauses do not generate stale-replication notifications.
 
-The success marker includes `startedAt` and `durationSeconds`. Dry runs emit `AZURE_FILES_REPLICATION_DRY_RUN_COMPLETED` instead, so they never satisfy a freshness rule.
+The success marker includes `startedAt` and `durationSeconds`. Dry runs emit `AZURE_FILES_REPLICATION_DRY_RUN_COMPLETED` instead, so they never satisfy a freshness rule. Each freshness rule counts only markers from its own job, by `EnvironmentName_s` and `ContainerJobName_s`, so the rules stay accurate when both regions, or other workloads, send logs to the same workspace, as they can when the Bicep existing-resource profile [reuses a central workspace](deploy/bicep/README.md#use-existing-log-analytics-workspaces).
 
 On a greenfield deployment, Log Analytics creates `ContainerAppConsoleLogs_CL` only after the first Container Apps log is ingested. The freshness rules therefore skip query validation during resource creation; Azure Monitor begins normal evaluation after the jobs emit logs and the table exists.
 
@@ -493,7 +494,7 @@ az monitor metrics alert list --resource-group <replication-resource-group> --ou
 az monitor scheduled-query list --resource-group <replication-resource-group> --output table
 ```
 
-List each regional workspace's GUID, and query its latest successful replication markers. Each region's workspace is in the same resource group as that region's job:
+List each regional workspace's GUID, and query its latest successful replication markers. Each region's workspace is in the same resource group as that region's job, unless the deployment reuses an existing workspace; the deployment's `primaryLogWorkspaceName` and `secondaryLogWorkspaceName` outputs name them:
 
 ```bash
 az monitor log-analytics workspace list --resource-group <resource-group> \
@@ -503,7 +504,7 @@ az monitor log-analytics query \
 	--workspace '<workspace-guid>' \
 	--analytics-query 'ContainerAppConsoleLogs_CL
 	| where Log_s contains "AZURE_FILES_REPLICATION_SUCCEEDED"
-	| project TimeGenerated, Log_s
+	| project TimeGenerated, ContainerJobName_s, Log_s
 	| order by TimeGenerated desc
 	| take 10' --output table
 ```

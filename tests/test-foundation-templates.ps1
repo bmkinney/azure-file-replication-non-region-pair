@@ -87,4 +87,10 @@ foreach ($output in 'createRoleAssignments', 'registryCreated', 'jobRoleAssignme
     Assert-True ($null -ne $main.outputs.$output) "main.bicep must output $output"
 }
 
+# The freshness rules tell the jobs' logs apart by environment and job name.
+$monitoring = @($mainResources | Where-Object { $_.type -eq 'Microsoft.Resources/deployments' -and $_.name -eq 'storage-replication-monitoring' })[0]
+foreach ($side in 'primary', 'secondary') {
+    Assert-True (([string]$monitoring.properties.parameters."${side}EnvironmentName".value).Contains("outputs.${side}EnvironmentName.value")) "main.bicep must pass the $side environment name to the monitoring rules"
+}
+
 Write-Host 'Foundation template contract checks passed.'

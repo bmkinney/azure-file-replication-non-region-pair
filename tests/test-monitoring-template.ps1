@@ -7,7 +7,10 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 $template = $compiledJson | ConvertFrom-Json -Depth 100
-$freshnessQuery = $template.variables.freshnessQuery
+$freshnessQuery = $template.variables.freshnessQueryTemplate
+if (-not $freshnessQuery) {
+    throw 'The monitoring module has no freshness query template.'
+}
 
 if ($freshnessQuery.Contains('${replicationLagThresholdMinutes}')) {
     throw 'The compiled freshness query contains an uninterpolated Bicep placeholder.'
@@ -15,8 +18,15 @@ if ($freshnessQuery.Contains('${replicationLagThresholdMinutes}')) {
 if (-not $freshnessQuery.Contains('ago({0}m)')) {
     throw 'The compiled freshness query does not format the configured lag threshold.'
 }
-if (-not $freshnessQuery.Contains("parameters('replicationLagThresholdMinutes')")) {
-    throw 'The compiled freshness query does not use the lag-threshold parameter.'
+# Both regions can share one workspace, so each rule must count only its own job's successes.
+if (-not $freshnessQuery.Contains('| where EnvironmentName_s == "{3}" and ContainerJobName_s == "{2}"')) {
+    throw 'The compiled freshness query does not filter on the environment and job names.'
+}
+foreach ($role in 'primary', 'secondary') {
+    $query = [string]$template.variables."${role}FreshnessQuery"
+    if (-not $query.Contains("variables('freshnessQueryTemplate')") -or -not $query.Contains("parameters('replicationLagThresholdMinutes')") -or -not $query.Contains("parameters('${role}JobName')") -or -not $query.Contains("parameters('${role}EnvironmentName')")) {
+        throw "The $role freshness query does not format the template with the lag threshold and the $role environment and job names."
+    }
 }
 
 # A newly activated direction must not alert before its first scheduled run is logged and ingested.
@@ -24,7 +34,7 @@ $graceParameter = $template.parameters.freshnessGraceStartTime
 if (-not $graceParameter -or $graceParameter.defaultValue -ne "[utcNow('o')]") {
     throw 'The freshness grace period must default to the deployment time in ISO 8601 format.'
 }
-if (-not $freshnessQuery.Contains("parameters('freshnessGraceStartTime')") -or -not $freshnessQuery.Contains('let graceEndsAt = datetime({1}) + {0}m;')) {
+if (-not $template.variables.primaryFreshnessQuery.Contains("parameters('freshnessGraceStartTime')") -or -not $freshnessQuery.Contains('let graceEndsAt = datetime({1}) + {0}m;')) {
     throw 'The compiled freshness query does not end its grace period one lag threshold after the grace start.'
 }
 if (-not $freshnessQuery.Contains('iff(now() < graceEndsAt, max_of(SuccessCount, 1), SuccessCount)')) {
@@ -39,9 +49,29 @@ if ($freshnessRules.Count -ne 2) {
 }
 
 foreach ($rule in $freshnessRules) {
-    if ($rule.properties.criteria.allOf[0].query -ne "[variables('freshnessQuery')]") {
-        throw "Scheduled query rule $($rule.name) does not use the validated freshness query."
+    $role = if ($rule.name -match 'secondaryFreshnessAlertName') { 'secondary' } else { 'primary' }
+    if ($rule.properties.criteria.allOf[0].query -ne "[variables('${role}FreshnessQuery')]") {
+        throw "Scheduled query rule $($rule.name) does not use the $role job's freshness query."
     }
+    if ($rule.location -ne "[parameters('${role}LogWorkspaceLocation')]") {
+        throw "Scheduled query rule $($rule.name) is not placed in its workspace's region."
+    }
+}
+
+# In a shared workspace, the rules tell the jobs apart by their resolved names, so identical names must fail the
+# deployment before any alert exists. Jobs with separate workspaces can share names.
+$collision = [string]$template.variables.jobLogsCollide
+foreach ($pair in @('LogWorkspaceId', 'EnvironmentName', 'JobName')) {
+    if (-not $collision.Contains("equals(toLower(parameters('primary$pair')), toLower(parameters('secondary$pair')))")) {
+        throw "The log collision check does not compare the jobs' ${pair} values case-insensitively: $collision"
+    }
+}
+if (-not ([string]$template.variables.validatedTags).StartsWith("[if(variables('jobLogsCollide'), fail(")) {
+    throw 'The monitoring module does not fail when the jobs share a workspace and names.'
+}
+$untagged = @($template.resources | Where-Object { $_.tags -ne "[variables('validatedTags')]" })
+if ($untagged.Count -gt 0) {
+    throw "Alert resources that skip the log collision check: $(@($untagged | ForEach-Object type) -join ', ')"
 }
 
 Write-Host 'Monitoring template contract checks passed.'

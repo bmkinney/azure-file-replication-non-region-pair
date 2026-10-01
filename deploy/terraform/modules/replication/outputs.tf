@@ -1,5 +1,7 @@
 output "primary_job_name" { value = azurerm_container_app_job.primary.name }
 output "secondary_job_name" { value = azurerm_container_app_job.secondary.name }
+output "primary_environment_name" { value = azurerm_container_app_environment.primary.name }
+output "secondary_environment_name" { value = azurerm_container_app_environment.secondary.name }
 output "primary_job_id" { value = azurerm_container_app_job.primary.id }
 output "secondary_job_id" { value = azurerm_container_app_job.secondary.id }
 output "primary_log_workspace_id" { value = azurerm_log_analytics_workspace.primary.id }
