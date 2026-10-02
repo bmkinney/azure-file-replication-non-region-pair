@@ -147,6 +147,7 @@ try {
         $failure = $null
         try { Invoke-Isolated { $global:TerraformScriptApplyError = $imageFailure; & $deployScript -TerraformDirectory $terraformDirectory -Confirm:$false 6> $null } } catch { $failure = $_.Exception.Message }
         Assert-True ($failure -like "*The job subnet couldn't reach mcr.microsoft.com*packages.aks.azure.com*") "deploy.ps1 did not explain an image that the job subnet can't reach: $failure"
+        Assert-True ($failure.Contains('*.login.microsoftonline.com, login.microsoft.com, and *.login.microsoft.com')) "deploy.ps1 did not list the sign-in endpoints, including login.microsoft.com: $failure"
         Assert-True (@($azCalls | Where-Object { $_ -like 'acr *' }).Count -eq 0) 'deploy.ps1 built the image after the bootstrap apply failed'
 
         Invoke-Isolated { & $switchScript -ActiveRegion secondary -WritesFenced -TerraformDirectory $terraformDirectory -WhatIf 6> $null }

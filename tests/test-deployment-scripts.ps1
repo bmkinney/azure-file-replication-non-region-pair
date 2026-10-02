@@ -245,6 +245,7 @@ try {
     $failure = Invoke-FailedBootstrap $collision
     Assert-True ($null -ne $failure -and $failure.Contains("The job subnet couldn't reach mcr.microsoft.com")) "deploy.ps1 did not explain an image that the job subnet can't reach: $failure"
     Assert-True ($failure.Contains('mcr.microsoft.com, *.data.mcr.microsoft.com, packages.aks.azure.com, and acs-mirror.azureedge.net')) 'deploy.ps1 did not list the Container Apps outbound dependencies'
+    Assert-True ($failure.Contains('*.login.microsoftonline.com, login.microsoft.com, and *.login.microsoft.com')) 'deploy.ps1 did not list the sign-in endpoints, including login.microsoft.com'
     Assert-True ($failure.Contains("replication-pri-compute in resource group rg-replication, started at 1/2/2026 3:04:05 PM")) 'deploy.ps1 did not name the running deployment'
     Assert-True ($failure.Contains('az deployment operation group list --resource-group rg-replication --name replication-pri-compute --output table') -and $failure.Contains('az deployment group cancel --resource-group rg-replication --name replication-pri-compute')) 'deploy.ps1 did not show how to inspect and cancel the running deployment'
     Assert-True (-not $failure.Contains('Azure Policy denied') -and -not $failure.Contains("isn't allowed to create role assignments")) 'deploy.ps1 showed unrelated hints for an image or collision failure'
@@ -256,6 +257,7 @@ try {
     $failure = Invoke-FailedBootstrap ("ERROR: {`"code`":`"InvalidParameterValueInContainerTemplate`",`"message`":`"$($imageMessage -f $privateImage, 'Get \"https://acrtest.azurecr.io/v2/\": dial tcp: lookup acrtest.azurecr.io on 168.63.129.16:53: no such host')`"}")
     Assert-True ($null -ne $failure -and $failure.Contains('approved private endpoint for the registry') -and $failure.Contains('resolves acrtest.azurecr.io') -and -not $failure.Contains('mcr.microsoft.com')) "deploy.ps1 did not point a private registry failure at its endpoint and DNS: $failure"
     Assert-True ($failure.Contains('With registryPrivateEndpointsEnabled = false') -and $failure.Contains('to acrtest.azurecr.io and its data endpoint, *.blob.core.windows.net')) "deploy.ps1 did not explain a registry failure through the registry's public endpoint: $failure"
+    Assert-True ($failure.Contains('a firewall must also allow login.microsoft.com')) "deploy.ps1 did not mention the registry sign-in endpoints: $failure"
 
     $failure = Invoke-FailedBootstrap ("ERROR: {`"code`":`"InvalidParameterValueInContainerTemplate`",`"message`":`"$($imageMessage -f $privateImage, 'GET https:?scope=repository%3Aazure-files-dr-azcopy%3Apull: UNAUTHORIZED: authentication required')`"}")
     Assert-True ($null -ne $failure -and $failure.Contains("The job identity isn't allowed to pull from acrtest.azurecr.io") -and $failure.Contains('AcrPull')) "deploy.ps1 did not explain a missing pull permission: $failure"
