@@ -14,7 +14,7 @@ Example CI/CD pipelines for GitHub Actions and Azure DevOps are in [pipelines](p
 
 ## Contents
 
-- [Architecture](#architecture), [design](#design), and [network requirements for server-side copy](#network-requirements-for-server-side-copy)
+- [Architecture](#architecture), [design](#design), [network requirements for server-side copy](#network-requirements-for-server-side-copy), and [outbound access through a firewall](#outbound-access-through-a-firewall)
 - [Choose a deployment method](#choose-a-deployment-method), [prerequisites](#prerequisites), and [repository layout](#repository-layout)
 - [Verify a deployment](#verify-a-deployment) and test replication end to end
 - [RBAC requirements](#rbac-requirements)
@@ -107,6 +107,24 @@ Reaching the other region only through a hub VNet or Virtual WAN hub satisfies n
 
 A VNet can link only one private DNS zone with a given name. If workload VNets share a central `privatelink.file.core.windows.net` zone, don't add a second private endpoint for an existing storage account to that zone: its record can redirect other workloads to the wrong endpoint. Use dedicated replication VNets with their own zone links, or use the direct-peering layout.
 
+### Outbound access through a firewall
+
+The jobs reach the storage accounts and the registry through private endpoints, but Container Apps itself also needs outbound HTTPS to Microsoft endpoints that don't offer private endpoints. A greenfield deployment's new VNets reach them directly. When a job subnet's internet traffic goes through a firewall, for example because a route table sends `0.0.0.0/0` to a hub firewall, or a Virtual WAN hub routes it there, the firewall must allow these from both job subnets, without TLS inspection. Microsoft lists them in [Azure Container Apps environment integration with Azure Firewall](https://learn.microsoft.com/azure/container-apps/use-azure-firewall).
+
+| Used for | Application rule FQDNs | Network rule service tags |
+| --- | --- | --- |
+| Microsoft Artifact Registry: Container Apps system images, and the placeholder image that the first deployment stage gives the jobs | `mcr.microsoft.com`, `*.data.mcr.microsoft.com` | `MicrosoftContainerRegistry`, `AzureFrontDoorFirstParty` |
+| Kubernetes and network plug-in binaries for the environment's infrastructure | `packages.aks.azure.com`, `acs-mirror.azureedge.net` | None; use application rules |
+| Sign-in for the job identities, which pull the image and authenticate AzCopy | `*.identity.azure.net`, `login.microsoftonline.com`, `*.login.microsoftonline.com`, `*.login.microsoft.com` | `AzureActiveDirectory` |
+
+Without them, job creation fails with `InvalidParameterValueInContainerTemplate` and an `EOF`, a timeout, or a TLS error for `mcr.microsoft.com`, or the Container Apps environment doesn't finish provisioning, and the deployment runs until it times out. See [Container Apps deployment problems](#container-apps-deployment-problems).
+
+These rules only allow outbound connections: nothing in your environment becomes reachable from the internet, and the storage accounts and registry keep public network access disabled. Removing the firewall route from the job subnets would also work, but it sends all of their internet traffic around the firewall; allowing these endpoints is the narrower change.
+
+Your own images don't need public access either. `az acr import` copies an image from a public registry, or from a temporary build registry, into a registry that denies public network access, through the registry's **Allow trusted services** setting, which is enabled by default; see [Import container images](https://learn.microsoft.com/azure/container-registry/container-registry-import-images#import-container-images-from-a-public-registry). For the AzCopy image, see [Put the AzCopy image in the registry](deploy/bicep/README.md#put-the-azcopy-image-in-the-registry). Importing images doesn't remove the firewall rules above, because Container Apps needs those endpoints for its own components.
+
+For the Bicep existing-resource profile, the [inventory check](deploy/bicep/README.md#inventory-check) reports each reused job subnet whose route table sends internet traffic through a firewall, or drops it. It can't see routes that the subnet learns through BGP or from a Virtual WAN hub.
+
 ## Choose a deployment method
 
 | | Bicep | Terraform | Azure portal |
@@ -150,6 +168,7 @@ Azure requirements:
 - Container Apps availability in both regions, and quota for Container Apps environments, private endpoints, Premium ACR, and the storage SKUs.
 - For each region's job, a dedicated Container Apps infrastructure subnet that is empty, delegated to `Microsoft.App/environments`, and at least `/27`. The templates create workload profiles environments that run the jobs on the serverless Consumption profile, and this environment type requires the delegation. Greenfield deployments and new VNets use a `/23`. With existing resources, you can reuse such a subnet, add one to an existing VNet, or create a VNet.
 - A network path that supports server-side copy between the two private storage accounts. See [Network requirements for server-side copy](#network-requirements-for-server-side-copy).
+- When a job subnet's internet traffic goes through a firewall, outbound access from it to the endpoints that Container Apps needs. See [Outbound access through a firewall](#outbound-access-through-a-firewall).
 
 Prefer a local terminal to Azure Cloud Shell for deployments, because Cloud Shell ends sessions after 20 idle minutes. A deployment continues server-side if the session ends.
 
@@ -730,6 +749,17 @@ Check name resolution from inside a job with a [one-off command](#run-a-one-off-
       getent hosts "$host" || echo "$host doesn't resolve"
     done
 ```
+
+### Container Apps deployment problems
+
+Container Apps reads a job's image from its registry, over the job subnet's network, when it creates or updates the job, so network problems in the job subnets can fail a deployment before any job runs. When a deployment fails with one of the image errors below, `scripts/deploy.ps1` and `deploy/terraform/deploy.ps1` explain its likely cause.
+
+| Symptom | Cause | Fix |
+| --- | --- | --- |
+| `InvalidParameterValueInContainerTemplate`, with `Field 'template.containers.azcopy.image' is invalid` and an `EOF`, a timeout, or a TLS error for `mcr.microsoft.com` | The job subnet's internet traffic goes through a firewall, or a proxy that inspects TLS, that blocks Microsoft Artifact Registry. The first deployment stage gives the jobs a placeholder image from `mcr.microsoft.com`. | Allow the [outbound dependencies](#outbound-access-through-a-firewall) in the firewall, then rerun the deployment. Importing your images into a private registry doesn't remove the need, because Container Apps uses these endpoints for its own components. |
+| The same error for `<registry>.azurecr.io`, with `no such host`, a timeout, or `client with IP ... is not allowed access` | The job VNet can't reach the registry's private endpoint, or resolves the registry's public address. | Check that the job VNet has an approved registry endpoint, and that its DNS resolves the registry name, and its regional data endpoint, to that endpoint through the `privatelink.azurecr.io` records. |
+| The same error with `UNAUTHORIZED` or `authentication required` | The job identity lacks AcrPull, or Container Registry Repository Reader on a registry with ABAC repository permissions, or the assignment hasn't taken effect yet. | Grant the role, wait up to 10 minutes, and rerun the deployment. |
+| A deployment runs for 30 minutes or more while it creates a Container Apps environment | The environment's infrastructure can't download its components through the firewall. | Allow the outbound dependencies. Then cancel the deployment, check the environment with `az containerapp env show --name <environment> --resource-group <resource-group> --query properties.provisioningState`, delete it if it's `Failed`, and rerun. An environment holds no data; the deployment recreates it. |
 
 ### Image build and registry problems
 

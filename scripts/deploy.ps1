@@ -42,6 +42,56 @@ function Get-PolicyHint([string]$ErrorText) {
     return "$hint Alternatively, ask the policy owner for an exemption on the replication resource groups. Then rerun this script; the deployment reuses the resources it already created."
 }
 
+function Get-ContainerImageHint([string]$ErrorText) {
+    # Container Apps reads a job's image from its registry, over the job subnet's network, when it creates or updates the job.
+    $flatText = [regex]::Replace($ErrorText, '\s*\r?\n[ \t]*(\|[ \t]?)?', ' ') -replace '\\"', '"'
+    $match = [regex]::Match($flatText, "image' is invalid with details: 'Invalid value: `"(?<image>[^`"]+)`": (?<detail>.+?)';")
+    if (-not $match.Success) {
+        return ''
+    }
+    $image = $match.Groups['image'].Value
+    $detail = $match.Groups['detail'].Value
+    $registry = ($image -split '/')[0]
+    $hint = "`n`nContainer Apps couldn't read the job image $image from its registry ($detail). It reads the image over the job subnet's network when it creates or updates a job."
+    if ($detail -match '(?i)\b(EOF|timeout|deadline exceeded|connection reset|connection refused|no route to host|network is unreachable|no such host|tls|x509|certificate|client with IP|not allowed access)\b') {
+        if ($registry -match '(?i)\.azurecr\.io$') {
+            return "$hint Check that the job VNet has an approved private endpoint for the registry, that its DNS resolves $registry to that endpoint, and that network security groups allow the traffic. Then rerun this script."
+        }
+        return "$hint The job subnet couldn't reach $registry, usually because its internet traffic goes through a firewall, or a proxy that inspects TLS. Container Apps needs outbound HTTPS from the job subnets to mcr.microsoft.com, *.data.mcr.microsoft.com, packages.aks.azure.com, and acs-mirror.azureedge.net, and, for the job identities, to *.identity.azure.net, login.microsoftonline.com, *.login.microsoftonline.com, and *.login.microsoft.com. Private endpoints can't replace these, so allow them in the firewall, without TLS inspection, and rerun this script. See 'Outbound access through a firewall' in the README; scripts/inventory.ps1 reports job subnets that route internet traffic through a firewall."
+    }
+    if ($detail -match '(?i)unauthori[sz]ed|authentication required|denied|forbidden') {
+        return "$hint The job identity isn't allowed to pull from $registry. Grant it AcrPull, or Container Registry Repository Reader on a registry with ABAC repository permissions, wait up to 10 minutes for the assignment to take effect, and rerun this script."
+    }
+    if ($detail -match '(?i)manifest unknown|not found') {
+        return "$hint The image isn't in the registry. Check it with az acr manifest show-metadata, or import it as described in 'Put the AzCopy image in the registry' in deploy/bicep/README.md."
+    }
+    return $hint
+}
+
+function Get-DeploymentActiveHint([string]$ErrorText) {
+    # Nested deployments have fixed names, so a run that starts before an earlier run's deployments finish collides with them.
+    $flatText = [regex]::Replace($ErrorText, '\s*\r?\n[ \t]*(\|[ \t]?)?', ' ') -replace '\\"', '"'
+    $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $details = foreach ($match in [regex]::Matches($flatText, "The deployment with resource id '(?<id>[^']+/providers/Microsoft\.Resources/deployments/(?<name>[^'/]+))' cannot be saved")) {
+        if (-not $seen.Add($match.Groups['id'].Value)) {
+            continue
+        }
+        $name = $match.Groups['name'].Value
+        $started = [regex]::Match($flatText.Substring($match.Index), "was started at '(?<time>[^']+)'").Groups['time'].Value
+        $startedText = if ($started) { ", started at $started" } else { '' }
+        $group = [regex]::Match($match.Groups['id'].Value, '(?i)/resourceGroups/(?<group>[^/]+)/').Groups['group'].Value
+        if ($group) {
+            "  $name in resource group $group$startedText`n    az deployment operation group list --resource-group $group --name $name --output table`n    az deployment group cancel --resource-group $group --name $name"
+        } else {
+            "  $name$startedText`n    az deployment operation sub list --name $name --output table`n    az deployment sub cancel --name $name"
+        }
+    }
+    if (@($details).Count -eq 0) {
+        return ''
+    }
+    return "`n`nDeployments from an earlier run are still running, so this run couldn't replace them. Stopping this script, or a Cloud Shell session that ends, doesn't stop deployments in Azure. For each one, the first command shows what it's still deploying, and the second cancels it:`n$($details -join "`n")`nWait for them to finish, or cancel them. A Container Apps environment that's still provisioning after 30 minutes usually can't reach the Container Apps outbound dependencies; see 'Outbound access through a firewall' in the README. Then rerun this script; the deployment reuses the resources it already created."
+}
+
 function Get-OutputValue($Deployment, [string]$Name) {
     # Deployments of earlier template versions lack newer outputs.
     $output = $Deployment.properties.outputs.PSObject.Properties[$Name]
@@ -68,7 +118,7 @@ function Invoke-AzCli {
     }
 
     if ($exitCode -ne 0) {
-        throw "az $($Arguments -join ' ') failed:`n$errorOutput`n$($output -join [Environment]::NewLine)$(Get-RoleAssignmentHint $errorOutput)$(Get-PolicyHint $errorOutput)"
+        throw "az $($Arguments -join ' ') failed:`n$errorOutput`n$($output -join [Environment]::NewLine)$(Get-RoleAssignmentHint $errorOutput)$(Get-PolicyHint $errorOutput)$(Get-ContainerImageHint $errorOutput)$(Get-DeploymentActiveHint $errorOutput)"
     }
     return ($output -join [Environment]::NewLine)
 }

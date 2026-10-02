@@ -132,6 +132,29 @@ function Test-Permission([string]$Scope, [string]$Action) {
     return [pscustomobject]@{ Allowed = $false; Error = $null }
 }
 
+# Container Apps needs these endpoints whenever its subnet's internet traffic goes through a firewall, and private
+# endpoints can't replace them: https://learn.microsoft.com/azure/container-apps/use-azure-firewall
+$outboundDependencies = 'mcr.microsoft.com, *.data.mcr.microsoft.com, packages.aks.azure.com, and acs-mirror.azureedge.net, and, for the job identities, *.identity.azure.net, login.microsoftonline.com, *.login.microsoftonline.com, and *.login.microsoft.com'
+$unlistedRoutes = 'Routes learned through BGP or from a Virtual WAN hub aren''t in route tables, so this check can''t see them; if they send internet traffic through a firewall, it must allow the Container Apps outbound dependencies.'
+
+# Describes where a route table sends internet traffic, from its 0.0.0.0/0 route.
+function Get-DefaultRoute([string]$RouteTableId) {
+    $tableName = Split-Path $RouteTableId -Leaf
+    $routeTable = Invoke-Az -Arguments @('network', 'route-table', 'show', '--ids', $RouteTableId)
+    if (-not $routeTable.Succeeded) {
+        return [pscustomobject]@{ Table = $tableName; Route = ''; NextHop = ''; Destination = ''; Error = $routeTable.Error }
+    }
+    $route = @(Get-Property $routeTable.Value 'routes' | Where-Object { (Get-Property $_ 'addressPrefix') -eq '0.0.0.0/0' }) | Select-Object -First 1
+    $nextHop = [string](Get-Property $route 'nextHopType')
+    $destination = switch ($nextHop) {
+        'VirtualAppliance' { "goes to the network appliance at $(Get-Property $route 'nextHopIpAddress')" }
+        'VirtualNetworkGateway' { 'goes to the virtual network gateway, which forces it on-premises' }
+        'None' { 'is dropped' }
+        default { '' }
+    }
+    return [pscustomobject]@{ Table = $tableName; Route = [string](Get-Property $route 'name'); NextHop = $nextHop; Destination = $destination; Error = $null }
+}
+
 function Get-ResourceDescriptor([string]$ResourceId) {
     # What-if returns an unevaluated expression when a name depends on a value created during the deployment.
     if ($ResourceId -match "^\[extensionResourceId\('([^']+)',\s*'([^']+)'") {
@@ -667,6 +690,23 @@ if ($isExistingProfile -and -not $hasPlaceholders) {
                     } else {
                         Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'Ready' -Detail "prefix=$prefix, delegated, not in use."
                     }
+
+                    $outboundItem = "$role outbound access from $subnetName"
+                    $routeTableId = [string](Get-Property $subnet 'routeTable.id')
+                    if (-not $routeTableId) {
+                        Add-Prerequisite -Area 'Network' -Item $outboundItem -Status 'Ready' -Detail "The subnet has no route table, so no user-defined route sends its internet traffic through a firewall. $unlistedRoutes"
+                    } else {
+                        $defaultRoute = Get-DefaultRoute $routeTableId
+                        if ($defaultRoute.Error) {
+                            Add-Prerequisite -Area 'Network' -Item $outboundItem -Status 'Not verified' -Detail "Could not read route table $($defaultRoute.Table). $($defaultRoute.Error)"
+                        } elseif ($defaultRoute.NextHop -eq 'None') {
+                            Add-Prerequisite -Area 'Network' -Item $outboundItem -Status 'Action required' -Detail "Internet traffic from the subnet is dropped by route $($defaultRoute.Route) in route table $($defaultRoute.Table), so Container Apps can't reach its outbound dependencies: $outboundDependencies. Send that traffic through a firewall that allows them, or remove the route. See 'Outbound access through a firewall' in the README."
+                        } elseif ($defaultRoute.Destination) {
+                            Add-Prerequisite -Area 'Network' -Item $outboundItem -Status 'Warning' -Detail "Internet traffic from the subnet $($defaultRoute.Destination), through route $($defaultRoute.Route) in route table $($defaultRoute.Table). Confirm that the firewall allows outbound HTTPS, without TLS inspection, to the Container Apps outbound dependencies: $outboundDependencies. Otherwise job creation fails with InvalidParameterValueInContainerTemplate, or the Container Apps environment doesn't finish provisioning. Private endpoints can't replace these. See 'Outbound access through a firewall' in the README."
+                        } else {
+                            Add-Prerequisite -Area 'Network' -Item $outboundItem -Status 'Ready' -Detail "Route table $($defaultRoute.Table) doesn't send internet traffic through a firewall. $unlistedRoutes"
+                        }
+                    }
                 } else {
                     Add-LookupFailure -Area 'Network' -Item "$role Container Apps subnet $subnetName" -Result $subnetResult -MissingDetail "Not found in VNet $vnetName. Set ${role}NetworkMode to newSubnet to add one."
                 }
@@ -704,6 +744,13 @@ if ($isExistingProfile -and -not $hasPlaceholders) {
                         } else {
                             Add-Prerequisite -Area 'Network' -Item $subnetItem -Status 'To be created' -Detail "The deployment adds $subnetName ($prefix), delegated to Microsoft.App/environments, to $vnetName. Add it to any other IaC that manages this VNet so that a later deployment doesn't remove it."
                         }
+                    }
+
+                    # The template adds the subnet without a route table, but Azure Policy or the network team may attach the one that the VNet's other subnets use.
+                    $routedTables = @($subnets | ForEach-Object { [string](Get-Property $_ 'routeTable.id') } | Where-Object { $_ } | Sort-Object -Unique | ForEach-Object { Get-DefaultRoute $_ } | Where-Object { $_.Destination })
+                    if ($routedTables.Count -gt 0) {
+                        $routedTable = $routedTables[0]
+                        Add-Prerequisite -Area 'Network' -Item "$role outbound access from $subnetName (new)" -Status 'Warning' -Detail "Other subnets in $vnetName use route table $($routedTable.Table), whose internet traffic $($routedTable.Destination). If the new job subnet gets that route table, for example through Azure Policy, the firewall must allow outbound HTTPS, without TLS inspection, to the Container Apps outbound dependencies: $outboundDependencies. See 'Outbound access through a firewall' in the README."
                     }
                 }
             }

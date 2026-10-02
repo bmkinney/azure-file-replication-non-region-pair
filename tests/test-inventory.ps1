@@ -238,6 +238,7 @@ try {
     Assert-True ((Get-Status $report 'secondary job copy path*') -contains 'Ready') 'the local-endpoint layout was not accepted for the secondary job'
     Assert-True (@(Get-Status $report '*DNS for file endpoints*' | Where-Object { $_ -ne 'Ready' }).Count -eq 0) 'DNS records that match local endpoints were not accepted'
     Assert-True ((Get-Status $report 'containerImage') -contains 'Ready') 'the digest-pinned image was not accepted'
+    Assert-True ((Get-Status $report 'primary outbound access from snet-jobs') -contains 'Ready') 'a job subnet without a route table was not accepted'
     Assert-True ($report.Summary.PrerequisitesActionRequired -eq 0) "unexpected action items: $(@($report.Prerequisites | Where-Object Status -eq 'Action required' | ForEach-Object Item) -join '; ')"
     Assert-True ($report.Summary.ResourcesToProvision -eq 1 -and $report.Summary.ResourcesExisting -eq 1) 'what-if results were not classified'
     $permissionItems = @(Get-PermissionRows $report | Where-Object Status -eq 'Ready' | ForEach-Object Item)
@@ -332,6 +333,35 @@ try {
     Assert-True ((Get-Status $report 'primary Container Apps subnet snet-jobs') -contains 'Ready') 'a delegated /26 subnet was not accepted'
     Assert-True ((Get-Status $report 'secondary Container Apps subnet snet-jobs') -contains 'Action required') 'a delegated /28 subnet was accepted'
 
+    # Container Apps needs its outbound dependencies, such as mcr.microsoft.com, from the job subnet. A default route to a
+    # firewall needs them allowed there, and a default route that drops internet traffic blocks them.
+    $routeTableRoot = "$subscription/resourceGroups/rg-network/providers/Microsoft.Network/routeTables"
+    function Get-RoutedSubnetRules([string]$PrimaryTable, [string]$SecondaryTable) {
+        @(
+            (New-Rule 'network vnet subnet show --resource-group rg-network-primary *' @{ addressPrefix = '10.0.0.0/23'; delegations = @(@{ serviceName = 'Microsoft.App/environments' }); serviceAssociationLinks = @(); routeTable = @{ id = "$routeTableRoot/$PrimaryTable" } }),
+            (New-Rule 'network vnet subnet show --resource-group rg-network-secondary *' @{ addressPrefix = '10.0.0.0/23'; delegations = @(@{ serviceName = 'Microsoft.App/environments' }); serviceAssociationLinks = @(); routeTable = @{ id = "$routeTableRoot/$SecondaryTable" } }),
+            (New-Rule "network route-table show --ids $routeTableRoot/rt-firewall *" @{ routes = @(@{ name = 'to-on-premises'; addressPrefix = '192.168.0.0/16'; nextHopType = 'VirtualNetworkGateway' }, @{ name = 'default-to-firewall'; addressPrefix = '0.0.0.0/0'; nextHopType = 'VirtualAppliance'; nextHopIpAddress = '10.100.0.4' }) }),
+            (New-Rule "network route-table show --ids $routeTableRoot/rt-blackhole *" @{ routes = @(@{ name = 'drop-internet'; addressPrefix = '0.0.0.0/0'; nextHopType = 'None' }) }),
+            (New-Rule "network route-table show --ids $routeTableRoot/rt-internet *" @{ routes = @(@{ name = 'internet'; addressPrefix = '0.0.0.0/0'; nextHopType = 'Internet' }) }),
+            (New-Rule "network route-table show --ids $routeTableRoot/rt-unreadable *" 'ERROR: (AuthorizationFailed) The client does not have authorization to read the route table.' 1)
+        )
+    }
+    $fakeAzRules = $commonRules + (Get-RoutedSubnetRules 'rt-firewall' 'rt-blackhole') + (Get-ExistingRules -PrimaryEndpoints @('pe-primary-file-a', 'pe-primary-file-b') -SecondaryEndpoints @('pe-secondary-file-a', 'pe-secondary-file-b'))
+    $report = Invoke-Inventory $parametersFile
+    $outboundRow = @($report.Prerequisites | Where-Object Item -eq 'primary outbound access from snet-jobs')
+    Assert-True ($outboundRow.Count -eq 1 -and $outboundRow[0].Status -eq 'Warning' -and $outboundRow[0].Detail -like '*network appliance at 10.100.0.4, through route default-to-firewall in route table rt-firewall*' -and $outboundRow[0].Detail -like '*mcr.microsoft.com, *.data.mcr.microsoft.com, packages.aks.azure.com, and acs-mirror.azureedge.net*') "a job subnet routed through a firewall was not flagged: $($outboundRow | ConvertTo-Json -Compress)"
+    $outboundRow = @($report.Prerequisites | Where-Object Item -eq 'secondary outbound access from snet-jobs')
+    Assert-True ($outboundRow.Count -eq 1 -and $outboundRow[0].Status -eq 'Action required' -and $outboundRow[0].Detail -like '*dropped by route drop-internet in route table rt-blackhole*') "a job subnet that drops internet traffic was not flagged: $($outboundRow | ConvertTo-Json -Compress)"
+    Assert-True ($report.Summary.PrerequisitesActionRequired -eq 1) "unexpected action items with routed job subnets: $(@($report.Prerequisites | Where-Object Status -eq 'Action required' | ForEach-Object Item) -join '; ')"
+
+    $fakeAzRules = $commonRules + (Get-RoutedSubnetRules 'rt-internet' 'rt-unreadable') + (Get-ExistingRules -PrimaryEndpoints @('pe-primary-file-a', 'pe-primary-file-b') -SecondaryEndpoints @('pe-secondary-file-a', 'pe-secondary-file-b'))
+    $report = Invoke-Inventory $parametersFile
+    $outboundRow = @($report.Prerequisites | Where-Object Item -eq 'primary outbound access from snet-jobs')
+    Assert-True ($outboundRow.Count -eq 1 -and $outboundRow[0].Status -eq 'Ready' -and $outboundRow[0].Detail -like "Route table rt-internet doesn't send internet traffic through a firewall.*") "a job subnet that sends internet traffic directly was not accepted: $($outboundRow | ConvertTo-Json -Compress)"
+    $outboundRow = @($report.Prerequisites | Where-Object Item -eq 'secondary outbound access from snet-jobs')
+    Assert-True ($outboundRow.Count -eq 1 -and $outboundRow[0].Status -eq 'Not verified' -and $outboundRow[0].Detail -like '*Could not read route table rt-unreadable*') "an unreadable route table was not reported: $($outboundRow | ConvertTo-Json -Compress)"
+    Assert-True ($report.Summary.PrerequisitesActionRequired -eq 0) "unexpected action items with readable and unreadable route tables: $(@($report.Prerequisites | Where-Object Status -eq 'Action required' | ForEach-Object Item) -join '; ')"
+
     # Reuse or create: a new secondary account, VNet, and registry, plus a new job subnet in the existing primary VNet.
     $hybridParametersFile = Join-Path $workRoot 'hybrid.test.bicepparam'
     $vnetPrimary = "$subscription/resourceGroups/rg-network-primary/providers/Microsoft.Network/virtualNetworks/vnet-primary"
@@ -362,12 +392,14 @@ param alertEmailAddresses = ['alerts@replication.test']
 "@ | Set-Content -LiteralPath $hybridParametersFile -Encoding utf8
     }
     function Get-HybridRules([bool]$NameAvailable) {
+        $hubRouteTable = "$subscription/resourceGroups/rg-network-primary/providers/Microsoft.Network/routeTables/rt-hub"
         @(
             (New-Rule 'network vnet show --resource-group rg-network-primary*' @{
                 id = $vnetPrimary; location = 'westus2'; dhcpOptions = @{ dnsServers = @() }; virtualNetworkPeerings = @()
                 addressSpace = @{ addressPrefixes = @('10.1.0.0/16') }
-                subnets = @(@{ name = 'snet-jobs-in-use'; addressPrefix = '10.1.0.0/23' }, @{ name = 'snet-endpoints'; addressPrefix = '10.1.2.0/24'; delegations = @() })
+                subnets = @(@{ name = 'snet-jobs-in-use'; addressPrefix = '10.1.0.0/23' }, @{ name = 'snet-endpoints'; addressPrefix = '10.1.2.0/24'; delegations = @(); routeTable = @{ id = $hubRouteTable } })
             }),
+            (New-Rule "network route-table show --ids $hubRouteTable *" @{ routes = @(@{ name = 'default-to-firewall'; addressPrefix = '0.0.0.0/0'; nextHopType = 'VirtualAppliance'; nextHopIpAddress = '10.100.0.4' }) }),
             (New-Rule 'storage account check-name --name stnewsecondary*' @{ nameAvailable = $NameAvailable; message = 'The storage account named stnewsecondary is already taken.' }),
             (New-Rule 'rest --method get --url *Microsoft.Storage/skus*' @{ value = @(@{ name = 'Standard_LRS'; kind = 'StorageV2'; locations = @('northcentralus'); restrictions = @() }) }),
             (New-Rule 'network vnet list*' @(@{ name = 'vnet-primary'; addressSpace = @{ addressPrefixes = @('10.1.0.0/16') } })),
@@ -381,6 +413,8 @@ param alertEmailAddresses = ['alerts@replication.test']
     Assert-True ((Get-Status $report 'secondary account stnewsecondary') -contains 'To be created') 'a new storage account was not reported as to be created'
     Assert-True ((Get-Status $report 'Standard_LRS in northcentralus') -contains 'Ready') 'the new account SKU was not checked'
     Assert-True ((Get-Status $report 'primary Container Apps subnet snet-replication-jobs (new)') -contains 'To be created') 'a free subnet prefix was not accepted'
+    $outboundRow = @($report.Prerequisites | Where-Object Item -eq 'primary outbound access from snet-replication-jobs (new)')
+    Assert-True ($outboundRow.Count -eq 1 -and $outboundRow[0].Status -eq 'Warning' -and $outboundRow[0].Detail -like 'Other subnets in vnet-primary use route table rt-hub, whose internet traffic goes to the network appliance at 10.100.0.4.*') "a new job subnet in a VNet whose subnets use a firewall was not flagged: $($outboundRow | ConvertTo-Json -Compress)"
     Assert-True ((Get-Status $report 'primary endpoint subnet snet-endpoints') -contains 'To be created') 'the endpoint subnet for new endpoints was not checked'
     Assert-True ((Get-Status $report 'primary file DNS zone for new endpoints') -contains 'Ready') 'a linked DNS zone for new endpoints was not accepted'
     Assert-True ((Get-Status $report 'primary registry DNS zone for new endpoints') -contains 'Warning') 'a missing registry DNS zone was not flagged'

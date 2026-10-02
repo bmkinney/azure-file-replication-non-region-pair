@@ -712,12 +712,14 @@ Skip only the steps your existing services already satisfy.
 | Existing service | Skip | Still verify |
 | --- | --- | --- |
 | Storage and shares | Step 5 account/share creation | Accounts and shares exist; identities can access data; both job VNets resolve and reach both accounts privately. |
-| VNets and subnets | Step 3 VNet creation | The job subnet is empty, delegated to `Microsoft.App/environments`, and at least `/27`; private endpoint subnet policies are disabled. |
+| VNets and subnets | Step 3 VNet creation | The job subnet is empty, delegated to `Microsoft.App/environments`, and at least `/27`; private endpoint subnet policies are disabled. If its route table sends internet traffic through a firewall, the firewall allows the [Container Apps outbound dependencies](../../README.md#outbound-access-through-a-firewall). |
 | DNS zones | Step 4 zone creation | Each job VNet links to the correct zone set. |
 | Private endpoints | Step 7 rows already present | Each job VNet has endpoints for both file accounts and, when needed, the registry. |
 | Registry | Step 6 registry creation | The digest-pinned image exists and both identities can pull it. |
 
 Server-side copy requires each job VNet to have private endpoints for **both** storage accounts with DNS resolving to them, or the two storage-account VNets must be directly peered. Hub or Virtual WAN transit fails with `403 CannotVerifyCopySource`; see [Network requirements for server-side copy](../../README.md#network-requirements-for-server-side-copy).
+
+Existing VNets often send internet traffic through a hub firewall. Container Apps still needs outbound HTTPS from the job subnets to Microsoft Artifact Registry and its other dependencies, which private endpoints can't replace. Without them, step 12 fails with `InvalidParameterValueInContainerTemplate`, or step 11 doesn't finish. Allow them first; see [Outbound access through a firewall](../../README.md#outbound-access-through-a-firewall). To keep an existing registry private, import the AzCopy image instead of opening the registry for a build; `az acr import` works with a registry that denies public network access.
 
 A VNet can link only one private DNS zone of a given name. Do not add a second endpoint record into a shared central `privatelink.file.core.windows.net` zone for the same account, because other workloads can resolve to the wrong endpoint. For automated, audited existing-resource deployment, use [deploy/bicep](../bicep/README.md).
 

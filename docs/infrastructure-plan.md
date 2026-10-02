@@ -34,6 +34,10 @@ AzCopy copies file data directly between the two storage services. With private 
 
 Reaching the other region only through a hub VNet or Virtual WAN hub fails with `403 CannotVerifyCopySource`. For the existing-resource profile, confirm one of these layouts before deployment; see the [README](../README.md#network-requirements-for-server-side-copy).
 
+### Outbound dependencies
+
+The storage and registry traffic stays on private endpoints, but Container Apps also needs outbound HTTPS from the job subnets to Microsoft Artifact Registry, its Kubernetes binary downloads, and Microsoft Entra ID for the job identities. None of these has a private endpoint. A greenfield deployment's VNets reach them directly; where a job subnet's internet traffic goes through a firewall, the firewall must allow them. The [README](../README.md#outbound-access-through-a-firewall) lists them, and the inventory check reports reused job subnets that route internet traffic through a firewall.
+
 ## RBAC and service permissions
 
 ### Runtime managed identities
