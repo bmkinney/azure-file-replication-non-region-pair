@@ -428,6 +428,38 @@ param alertEmailAddresses = ['alerts@replication.test']
     Assert-True ($subscriptionRow.Count -eq 1 -and $subscriptionRow[0].Detail -like '*Storage File Data Privileged Contributor and AcrPull*') "the new account and registry in a group the deployment creates were not checked together at the subscription: $($subscriptionRow | ConvertTo-Json -Compress)"
     Assert-True ((Get-Status $report 'Role assignments on primary storage account stprimarytest') -contains 'Ready') 'the reused primary account was not checked in the hybrid layout'
 
+    # A job subnet that an earlier deployment created is checked by its own route table, not by those of other subnets.
+    $primaryRouteTables = "$subscription/resourceGroups/rg-network-primary/providers/Microsoft.Network/routeTables"
+    function Get-HybridVnetRule([object[]]$ExtraSubnets) {
+        New-Rule 'network vnet show --resource-group rg-network-primary*' @{
+            id = $vnetPrimary; location = 'westus2'; dhcpOptions = @{ dnsServers = @() }; virtualNetworkPeerings = @()
+            addressSpace = @{ addressPrefixes = @('10.1.0.0/16') }
+            subnets = @(@{ name = 'snet-jobs-in-use'; addressPrefix = '10.1.0.0/23' }, @{ name = 'snet-endpoints'; addressPrefix = '10.1.2.0/24'; delegations = @(); routeTable = @{ id = "$primaryRouteTables/rt-hub" } }) + $ExtraSubnets
+        }
+    }
+    $droppingRouteRule = New-Rule "network route-table show --ids $primaryRouteTables/rt-drop *" @{ routes = @(@{ name = 'drop-internet'; addressPrefix = '0.0.0.0/0'; nextHopType = 'None' }) }
+    $unreadableHubRule = New-Rule "network route-table show --ids $primaryRouteTables/rt-hub *" 'ERROR: (AuthorizationFailed) The client does not have authorization to read the route table.' 1
+    $createdSubnet = @{ name = 'snet-replication-jobs'; addressPrefix = '10.1.4.0/23'; delegations = @(@{ serviceName = 'Microsoft.App/environments' }); routeTable = @{ id = "$primaryRouteTables/rt-drop" } }
+    $fakeAzRules = @((Get-HybridVnetRule @($createdSubnet)), $droppingRouteRule) + $commonRules + (Get-HybridRules $true) + (Get-ExistingRules -PrimaryEndpoints @('pe-primary-file-a', 'pe-primary-file-b') -SecondaryEndpoints @())
+    $report = Invoke-Inventory $hybridParametersFile
+    Assert-True ((Get-Status $report 'primary Container Apps subnet snet-replication-jobs (new)') -contains 'Ready') 'a job subnet created by an earlier deployment was not accepted'
+    $outboundRow = @($report.Prerequisites | Where-Object Item -eq 'primary outbound access from snet-replication-jobs')
+    Assert-True ($outboundRow.Count -eq 1 -and $outboundRow[0].Status -eq 'Action required' -and $outboundRow[0].Detail -like '*dropped by route drop-internet in route table rt-drop*') "a created job subnet that drops internet traffic was not flagged: $($outboundRow | ConvertTo-Json -Compress)"
+    Assert-True (@($report.Prerequisites | Where-Object Item -eq 'primary outbound access from snet-replication-jobs (new)').Count -eq 0) 'a created job subnet was also checked against the route tables of other subnets'
+    Assert-True ($report.Summary.PrerequisitesActionRequired -eq 1) "unexpected action items with a created job subnet: $(@($report.Prerequisites | Where-Object Status -eq 'Action required' | ForEach-Object Item) -join '; ')"
+
+    # For a subnet still to be created, other subnets' route tables that drop internet traffic or can't be read are reported.
+    $droppingSibling = @{ name = 'snet-other'; addressPrefix = '10.1.3.0/24'; delegations = @(); routeTable = @{ id = "$primaryRouteTables/rt-drop" } }
+    $fakeAzRules = @((Get-HybridVnetRule @($droppingSibling)), $droppingRouteRule, $unreadableHubRule) + $commonRules + (Get-HybridRules $true) + (Get-ExistingRules -PrimaryEndpoints @('pe-primary-file-a', 'pe-primary-file-b') -SecondaryEndpoints @())
+    $report = Invoke-Inventory $hybridParametersFile
+    $outboundRow = @($report.Prerequisites | Where-Object Item -eq 'primary outbound access from snet-replication-jobs (new)')
+    Assert-True ($outboundRow.Count -eq 1 -and $outboundRow[0].Status -eq 'Warning' -and $outboundRow[0].Detail -like 'Other subnets in vnet-primary use route table rt-drop, whose internet traffic is dropped.*' -and $outboundRow[0].Detail -like '*Could not read route table rt-hub, which other subnets in vnet-primary also use.*') "a dropping or unreadable route table on other subnets was not reported: $($outboundRow | ConvertTo-Json -Compress)"
+
+    $fakeAzRules = @($unreadableHubRule) + $commonRules + (Get-HybridRules $true) + (Get-ExistingRules -PrimaryEndpoints @('pe-primary-file-a', 'pe-primary-file-b') -SecondaryEndpoints @())
+    $report = Invoke-Inventory $hybridParametersFile
+    $outboundRow = @($report.Prerequisites | Where-Object Item -eq 'primary outbound access from snet-replication-jobs (new)')
+    Assert-True ($outboundRow.Count -eq 1 -and $outboundRow[0].Status -eq 'Not verified' -and $outboundRow[0].Detail -like 'Could not read route table rt-hub, which other subnets in vnet-primary use.*') "an unreadable route table on other subnets was not reported: $($outboundRow | ConvertTo-Json -Compress)"
+
     Set-HybridParameters '10.1.2.0/25'
     $fakeAzRules = $commonRules + (Get-HybridRules $false) + (Get-ExistingRules -PrimaryEndpoints @('pe-primary-file-a', 'pe-primary-file-b') -SecondaryEndpoints @())
     $report = Invoke-Inventory $hybridParametersFile

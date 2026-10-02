@@ -113,9 +113,11 @@ The jobs reach the storage accounts and the registry through private endpoints, 
 
 | Used for | Application rule FQDNs | Network rule service tags |
 | --- | --- | --- |
-| Microsoft Artifact Registry: Container Apps system images, and the placeholder image that the first deployment stage gives the jobs | `mcr.microsoft.com`, `*.data.mcr.microsoft.com` | `MicrosoftContainerRegistry`, `AzureFrontDoorFirstParty` |
+| Microsoft Artifact Registry: Container Apps system images, and the placeholder image that the first deployment stage gives the jobs | `mcr.microsoft.com`, `*.data.mcr.microsoft.com` | `MicrosoftContainerRegistry`, `AzureFrontDoor.FirstParty` |
 | Kubernetes and network plug-in binaries for the environment's infrastructure | `packages.aks.azure.com`, `acs-mirror.azureedge.net` | None; use application rules |
 | Sign-in for the job identities, which pull the image and authenticate AzCopy | `*.identity.azure.net`, `login.microsoftonline.com`, `*.login.microsoftonline.com`, `*.login.microsoft.com` | `AzureActiveDirectory` |
+
+The Container Apps article spells the Front Door tag `AzureFrontDoorFirstParty`; firewall rules need its name from the [service tag list](https://learn.microsoft.com/azure/virtual-network/service-tags-overview#available-service-tags), `AzureFrontDoor.FirstParty`.
 
 Without them, job creation fails with `InvalidParameterValueInContainerTemplate` and an `EOF`, a timeout, or a TLS error for `mcr.microsoft.com`, or the Container Apps environment doesn't finish provisioning, and the deployment runs until it times out. See [Container Apps deployment problems](#container-apps-deployment-problems).
 
@@ -123,7 +125,7 @@ These rules only allow outbound connections: nothing in your environment becomes
 
 Your own images don't need public access either. `az acr import` copies an image from a public registry, or from a temporary build registry, into a registry that denies public network access, through the registry's **Allow trusted services** setting, which is enabled by default; see [Import container images](https://learn.microsoft.com/azure/container-registry/container-registry-import-images#import-container-images-from-a-public-registry). For the AzCopy image, see [Put the AzCopy image in the registry](deploy/bicep/README.md#put-the-azcopy-image-in-the-registry). Importing images doesn't remove the firewall rules above, because Container Apps needs those endpoints for its own components.
 
-For the Bicep existing-resource profile, the [inventory check](deploy/bicep/README.md#inventory-check) reports each reused job subnet whose route table sends internet traffic through a firewall, or drops it. It can't see routes that the subnet learns through BGP or from a Virtual WAN hub.
+For the Bicep existing-resource profile, the [inventory check](deploy/bicep/README.md#inventory-check) reports each job subnet whose route table sends internet traffic through a firewall, or drops it. For a job subnet that the deployment adds, it warns when other subnets in the VNet use such a route table. It can't see routes that a subnet learns through BGP or from a Virtual WAN hub.
 
 ## Choose a deployment method
 
