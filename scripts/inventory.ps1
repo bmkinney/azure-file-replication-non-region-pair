@@ -135,7 +135,7 @@ function Test-Permission([string]$Scope, [string]$Action) {
 # Container Apps needs these endpoints whenever its subnet's internet traffic goes through a firewall, and private
 # endpoints can't replace them: https://learn.microsoft.com/azure/container-apps/use-azure-firewall
 $outboundDependencies = 'mcr.microsoft.com, *.data.mcr.microsoft.com, packages.aks.azure.com, and acs-mirror.azureedge.net, and, for the job identities, *.identity.azure.net, login.microsoftonline.com, *.login.microsoftonline.com, and *.login.microsoft.com'
-$unlistedRoutes = 'Routes learned through BGP or from a Virtual WAN hub aren''t in route tables, so this check can''t see them; if they send internet traffic through a firewall, it must allow the Container Apps outbound dependencies.'
+$unlistedRoutes = 'This check reads only 0.0.0.0/0 routes in route tables. Narrower routes, such as service tag routes, and routes learned through BGP or from a Virtual WAN hub can also send this traffic through a firewall, which must then allow the Container Apps outbound dependencies.'
 
 # Describes where a route table sends internet traffic, from its 0.0.0.0/0 route.
 function Get-DefaultRoute([string]$RouteTableId) {

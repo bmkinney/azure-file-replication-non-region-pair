@@ -109,7 +109,7 @@ A VNet can link only one private DNS zone with a given name. If workload VNets s
 
 ### Outbound access through a firewall
 
-The jobs reach the storage accounts and the registry through private endpoints, but Container Apps itself also needs outbound HTTPS to Microsoft endpoints that don't offer private endpoints. A greenfield deployment's new VNets reach them directly. When a job subnet's internet traffic goes through a firewall, for example because a route table sends `0.0.0.0/0` to a hub firewall, or a Virtual WAN hub routes it there, the firewall must allow these from both job subnets, without TLS inspection. Microsoft lists them in [Azure Container Apps environment integration with Azure Firewall](https://learn.microsoft.com/azure/container-apps/use-azure-firewall).
+The jobs reach the storage accounts, and usually the registry, through private endpoints, but Container Apps itself also needs outbound HTTPS to Microsoft endpoints that don't offer private endpoints. A greenfield deployment's new VNets reach them directly. When a job subnet's internet traffic goes through a firewall, for example because a route table sends `0.0.0.0/0` to a hub firewall, or a Virtual WAN hub routes it there, the firewall must allow these from both job subnets, without TLS inspection. Microsoft lists them in [Azure Container Apps environment integration with Azure Firewall](https://learn.microsoft.com/azure/container-apps/use-azure-firewall).
 
 | Used for | Application rule FQDNs | Network rule service tags |
 | --- | --- | --- |
@@ -125,11 +125,11 @@ If the jobs use a registry's public endpoint, with the Bicep existing-resource p
 
 Without them, job creation fails with `InvalidParameterValueInContainerTemplate` and an `EOF`, a timeout, or a TLS error for `mcr.microsoft.com`, or the Container Apps environment doesn't finish provisioning, and the deployment runs until it times out. See [Container Apps deployment problems](#container-apps-deployment-problems).
 
-These rules only allow outbound connections: nothing in your environment becomes reachable from the internet, and the storage accounts and registry keep public network access disabled. Removing the firewall route from the job subnets would also work, but it sends all of their internet traffic around the firewall; allowing these endpoints is the narrower change.
+These rules only allow outbound connections: nothing in your environment becomes reachable from the internet, and the storage accounts, and a registry that the jobs reach through private endpoints, keep public network access disabled. Removing the firewall route from the job subnets would also work, but it sends all of their internet traffic around the firewall; allowing these endpoints is the narrower change.
 
 Your own images don't need public access either. `az acr import` copies an image from a public registry, or from a temporary build registry, into a registry that denies public network access, through the registry's **Allow trusted services** setting, which is enabled by default; see [Import container images](https://learn.microsoft.com/azure/container-registry/container-registry-import-images#import-container-images-from-a-public-registry). For the AzCopy image, see [Put the AzCopy image in the registry](deploy/bicep/README.md#put-the-azcopy-image-in-the-registry). Importing images doesn't remove the firewall rules above, because Container Apps needs those endpoints for its own components.
 
-For the Bicep existing-resource profile, the [inventory check](deploy/bicep/README.md#inventory-check) reports each job subnet whose route table sends internet traffic through a firewall, or drops it. For a job subnet that the deployment adds, it warns when other subnets in the VNet use such a route table. It can't see routes that a subnet learns through BGP or from a Virtual WAN hub.
+For the Bicep existing-resource profile, the [inventory check](deploy/bicep/README.md#inventory-check) reports each job subnet whose route table sends internet traffic through a firewall, or drops it. For a job subnet that the deployment adds, it warns when other subnets in the VNet use such a route table. It reads only each route table's `0.0.0.0/0` route, so it can't see narrower routes, such as service tag routes, or routes that a subnet learns through BGP or from a Virtual WAN hub.
 
 ## Choose a deployment method
 
