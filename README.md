@@ -119,6 +119,8 @@ The jobs reach the storage accounts and the registry through private endpoints, 
 
 The Container Apps article spells the Front Door tag `AzureFrontDoorFirstParty`; firewall rules need its name from the [service tag list](https://learn.microsoft.com/azure/virtual-network/service-tags-overview#available-service-tags), `AzureFrontDoor.FirstParty`.
 
+The environments also send the jobs' logs, which the freshness alert queries, to Log Analytics. Microsoft's [network security group rules for workload profiles environments](https://learn.microsoft.com/azure/container-apps/firewall-integration) list outbound TCP 443 to the `AzureMonitor` service tag when an environment uses Azure Monitor, so allow it too. Otherwise, the logs may not arrive, and the freshness alert fires even though replication runs. The UDP 1194, TCP 9000, and NTP rules in that article apply only to Consumption-only environments, which this solution doesn't use.
+
 If the jobs use a registry's public endpoint, with the Bicep existing-resource profile's `registryPrivateEndpointsEnabled = false`, also allow the registry's [REST and data endpoints](https://learn.microsoft.com/azure/container-registry/container-registry-firewall-rules).
 
 Without them, job creation fails with `InvalidParameterValueInContainerTemplate` and an `EOF`, a timeout, or a TLS error for `mcr.microsoft.com`, or the Container Apps environment doesn't finish provisioning, and the deployment runs until it times out. See [Container Apps deployment problems](#container-apps-deployment-problems).
@@ -796,6 +798,7 @@ Container Apps reads a job's image from its registry, over the job subnet's netw
 | No alert email arrives | A wrong address, mail filtering, or `monitoringEnabled = false`. | Check `alertEmailAddresses`, and test the action group from its **Test action group** pane. |
 | `Failed to resolve table or column expression named 'ContainerAppConsoleLogs_CL'` | The table doesn't exist until the first Container Apps log is ingested. | Wait for the first execution, plus 5 to 10 minutes of ingestion. The alert rules skip query validation at creation for this reason. |
 | A stale-replication alert fires | The active job isn't scheduled, its runs fail or haven't logged a success marker within the threshold, or ingestion is delayed. | Check the active job's trigger and its latest markers, as described in [Verify a deployment](#verify-a-deployment). Each deployment's grace period lasts one threshold. |
+| Job executions succeed, but their logs don't reach the workspace, and the stale-replication alert fires | The job subnet's internet traffic goes through a firewall that blocks Azure Monitor. | Allow outbound TCP 443 to the `AzureMonitor` service tag. See [Outbound access through a firewall](#outbound-access-through-a-firewall). |
 | A resolved condition keeps the alert open | Stateful log search alerts resolve after three evaluations without the condition, about 30 minutes. | Wait. |
 | A failed-execution alert fires after a test | A one-off command exited with a nonzero code. | Expected. The alert resolves after the condition clears. |
 | `az monitor scheduled-query` asks to install an extension | The command is part of the `scheduled-query` extension. | Run `az extension add --name scheduled-query`. |
