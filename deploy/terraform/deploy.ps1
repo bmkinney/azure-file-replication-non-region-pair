@@ -29,6 +29,33 @@ function Get-RoleAssignmentHint([string]$ErrorText) {
     return "`n`nThe signed-in identity isn't allowed to create role assignments at:`n$scopeList`nThe deployment assigns AcrPull on the registry and Storage File Data Privileged Contributor on the file storage accounts to the replication job identities. Grant Role Based Access Control Administrator, which can be limited to those two roles, or User Access Administrator or Owner at these scopes or above. After a few minutes, rerun this script. Alternatively, set create_role_assignments = false in terraform.tfvars and have an administrator run scripts/grant-access.ps1."
 }
 
+function Get-ContainerImageHint([string]$ErrorText) {
+    # Container Apps reads a job's image from its registry, over the job subnet's network, when it creates or updates the
+    # job. Terraform frames its diagnostics with box-drawing characters, which are removed with the line breaks.
+    $flatText = [regex]::Replace($ErrorText, '\s*\r?\n[ \t]*([|\u2502][ \t]?)?', ' ') -replace '\\"', '"'
+    $match = [regex]::Match($flatText, "image' is invalid with details: 'Invalid value: `"(?<image>[^`"]+)`": (?<detail>.+?)';")
+    if (-not $match.Success) {
+        return ''
+    }
+    $image = $match.Groups['image'].Value
+    $detail = $match.Groups['detail'].Value
+    $registry = ($image -split '/')[0]
+    $hint = "`n`nContainer Apps couldn't read the job image $image from its registry ($detail). It reads the image over the job subnet's network when it creates or updates a job."
+    if ($detail -match '(?i)\b(EOF|timeout|deadline exceeded|connection reset|connection refused|no route to host|network is unreachable|no such host|tls|x509|certificate|client with IP|not allowed access)\b') {
+        if ($registry -match '(?i)\.azurecr\.io$') {
+            return "$hint Check that the job VNet has an approved private endpoint for the registry, that its DNS resolves $registry to that endpoint, and that network security groups allow the traffic. The job identities also sign in to the registry through Microsoft Entra ID, which private endpoints don't cover, so a firewall must also allow login.microsoft.com, login.microsoftonline.com, and the other sign-in endpoints in 'Outbound access through a firewall' in the README. Then rerun this script."
+        }
+        return "$hint The job subnet couldn't reach $registry, usually because its internet traffic goes through a firewall, or a proxy that inspects TLS. Container Apps needs outbound HTTPS from the job subnets to mcr.microsoft.com, *.data.mcr.microsoft.com, packages.aks.azure.com, and acs-mirror.azureedge.net, and, for the job identities, to *.identity.azure.net, login.microsoftonline.com, *.login.microsoftonline.com, login.microsoft.com, and *.login.microsoft.com. Private endpoints can't replace these, so allow them in the firewall, without TLS inspection, and rerun this script. See 'Outbound access through a firewall' in the README."
+    }
+    if ($detail -match '(?i)unauthori[sz]ed|authentication required|denied|forbidden') {
+        return "$hint The job identity isn't allowed to pull from $registry. Grant it AcrPull, or Container Registry Repository Reader on a registry with ABAC repository permissions, wait up to 10 minutes for the assignment to take effect, and rerun this script."
+    }
+    if ($detail -match '(?i)manifest unknown|not found') {
+        return "$hint The image isn't in the registry. Check it with az acr manifest show-metadata, or build or import it again."
+    }
+    return $hint
+}
+
 function Invoke-AzCli {
     param([Parameter(Mandatory)][string[]]$Arguments)
 
@@ -64,7 +91,7 @@ function Invoke-Terraform {
 
     if ($exitCode -ne 0) {
         $flatError = [regex]::Replace($errorOutput, '\s*\r?\n[ \t]*(\|[ \t]?)?', ' ').Trim()
-        throw "terraform $($Arguments -join ' ') failed:`n$flatError`n$($output -join [Environment]::NewLine)$(Get-RoleAssignmentHint $flatError)"
+        throw "terraform $($Arguments -join ' ') failed:`n$flatError`n$($output -join [Environment]::NewLine)$(Get-RoleAssignmentHint $flatError)$(Get-ContainerImageHint $errorOutput)"
     }
     return ($output -join [Environment]::NewLine)
 }

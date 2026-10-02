@@ -27,6 +27,7 @@ $azCalls = [System.Collections.Generic.List[string]]::new()
 $global:TerraformScriptCreateRoleAssignments = $true
 $global:TerraformScriptJobImages = @($image, $image)
 $global:TerraformScriptRunningExecutions = 0
+$global:TerraformScriptApplyError = $null
 
 function New-Outputs([bool]$CreateRoles = $true) {
     @{
@@ -53,6 +54,11 @@ function terraform {
         return (ConvertTo-Json -InputObject (New-Outputs $global:TerraformScriptCreateRoleAssignments) -Depth 10 -Compress)
     }
     if ($joined -like '* plan *') { return 'plan ok' }
+    if ($global:TerraformScriptApplyError -and $joined -like '* apply *') {
+        $global:LASTEXITCODE = 1
+        Write-Error $global:TerraformScriptApplyError -ErrorAction Continue
+        return
+    }
     return ''
 }
 
@@ -91,6 +97,7 @@ function Invoke-Isolated([scriptblock]$Action) {
     $global:TerraformScriptCreateRoleAssignments = $true
     $global:TerraformScriptJobImages = @($image, $image)
     $global:TerraformScriptRunningExecutions = 0
+    $global:TerraformScriptApplyError = $null
     try {
         & $Action
     } finally {
@@ -126,6 +133,22 @@ try {
         $applies = @($terraformCalls | Where-Object { $_ -like '* apply *' })
         Assert-True ($failure -like '*missing role assignments*grant-access.ps1 -TerraformDirectory*') "missing role guidance was not shown: $failure"
         Assert-True ($applies.Count -eq 2 -and $applies[1] -like '*active_region=none*' -and $applies[1] -like '*acr_public_network_access_enabled=false*') 'deploy.ps1 did not close the registry after missing roles'
+
+        # Terraform frames diagnostics with box-drawing characters; the image hint must still find the Container Apps error.
+        $bar = [char]0x2502
+        $imageFailure = @(
+            "$bar Error: creating Container App Job (Subscription: `"00000000-0000-0000-0000-000000000000`""
+            "$bar Resource Group Name: `"rg-terraform`""
+            "$bar Job Name: `"job-sync-secondary`"): polling after CreateOrUpdate: polling failed: the Azure API returned the following error:"
+            $bar
+            "$bar Status: `"InvalidParameterValueInContainerTemplate`""
+            "$bar Message: `"The following field(s) are either invalid or missing. Field 'template.containers.azcopy.image' is invalid with details: 'Invalid value: \`"mcr.microsoft.com/azuredocs/containerapps-helloworld:latest\`": Get \`"https://mcr.microsoft.com/v2/\`": EOF';.`""
+        ) -join "`n"
+        $failure = $null
+        try { Invoke-Isolated { $global:TerraformScriptApplyError = $imageFailure; & $deployScript -TerraformDirectory $terraformDirectory -Confirm:$false 6> $null } } catch { $failure = $_.Exception.Message }
+        Assert-True ($failure -like "*The job subnet couldn't reach mcr.microsoft.com*packages.aks.azure.com*") "deploy.ps1 did not explain an image that the job subnet can't reach: $failure"
+        Assert-True ($failure.Contains('*.login.microsoftonline.com, login.microsoft.com, and *.login.microsoft.com')) "deploy.ps1 did not list the sign-in endpoints, including login.microsoft.com: $failure"
+        Assert-True (@($azCalls | Where-Object { $_ -like 'acr *' }).Count -eq 0) 'deploy.ps1 built the image after the bootstrap apply failed'
 
         Invoke-Isolated { & $switchScript -ActiveRegion secondary -WritesFenced -TerraformDirectory $terraformDirectory -WhatIf 6> $null }
         Assert-True (@($azCalls | Where-Object { $_ -like 'containerapp job execution list*' }).Count -eq 2) 'switch-direction.ps1 did not check running executions'

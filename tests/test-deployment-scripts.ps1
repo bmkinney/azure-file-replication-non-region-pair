@@ -224,6 +224,44 @@ try {
     Assert-True ($failure.Contains('set primaryLogWorkspaceId and secondaryLogWorkspaceId')) 'deploy.ps1 did not point to reusing Log Analytics workspaces'
     Assert-True (-not $failure.Contains("isn't allowed to create role assignments")) 'deploy.ps1 reported refused role assignments for a policy denial'
 
+    # A job image that Container Apps can't read, and a run that collides with an earlier run's nested deployment.
+    function Invoke-FailedBootstrap([string]$ErrorText) {
+        $script:fakeAzRules = $commonRules + @(
+            (New-Rule 'deployment sub validate*' '{}')
+            (New-Rule 'deployment sub create*' $ErrorText 1)
+        )
+        try {
+            Invoke-WithIsolatedTemp { & $deployScript -ParametersFile $parametersFile -SkipWhatIf -Confirm:$false 6> $null 2> $null }
+        } catch {
+            return $_.Exception.Message
+        }
+        return $null
+    }
+    $imageMessage = 'The following field(s) are either invalid or missing. Field ''template.containers.azcopy.image'' is invalid with details: ''Invalid value: \"{0}\": {1}'';.'
+    $activeMessage = 'The deployment with resource id ''{0}'' cannot be saved, because this would overwrite an existing deployment which is still active. The previous deployment was started at ''1/2/2026 3:04:05 PM'' with correlationId ''11111111-1111-1111-1111-111111111111'', and will expire at ''1/9/2026 3:04:05 PM'' if it does not complete before then.'
+    $nestedActive = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-replication/providers/Microsoft.Resources/deployments/replication-pri-compute'
+    $imageError = $imageMessage -f 'mcr.microsoft.com/azuredocs/containerapps-helloworld:latest', 'Get \"https://mcr.microsoft.com/v2/\": EOF'
+    $collision = "ERROR: {`"status`":`"Failed`",`"error`":{`"code`":`"DeploymentFailed`",`"details`":[{`"code`":`"ResourceDeploymentFailure`",`"details`":[{`"code`":`"DeploymentFailed`",`"details`":[{`"code`":`"InvalidParameterValueInContainerTemplate`",`"message`":`"$imageError`"}]}]},{`"code`":`"DeploymentActive`",`"message`":`"$($activeMessage -f $nestedActive)`"}]}}"
+    $failure = Invoke-FailedBootstrap $collision
+    Assert-True ($null -ne $failure -and $failure.Contains("The job subnet couldn't reach mcr.microsoft.com")) "deploy.ps1 did not explain an image that the job subnet can't reach: $failure"
+    Assert-True ($failure.Contains('mcr.microsoft.com, *.data.mcr.microsoft.com, packages.aks.azure.com, and acs-mirror.azureedge.net')) 'deploy.ps1 did not list the Container Apps outbound dependencies'
+    Assert-True ($failure.Contains('*.login.microsoftonline.com, login.microsoft.com, and *.login.microsoft.com')) 'deploy.ps1 did not list the sign-in endpoints, including login.microsoft.com'
+    Assert-True ($failure.Contains("replication-pri-compute in resource group rg-replication, started at 1/2/2026 3:04:05 PM")) 'deploy.ps1 did not name the running deployment'
+    Assert-True ($failure.Contains('az deployment operation group list --resource-group rg-replication --name replication-pri-compute --output table') -and $failure.Contains('az deployment group cancel --resource-group rg-replication --name replication-pri-compute')) 'deploy.ps1 did not show how to inspect and cancel the running deployment'
+    Assert-True (-not $failure.Contains('Azure Policy denied') -and -not $failure.Contains("isn't allowed to create role assignments")) 'deploy.ps1 showed unrelated hints for an image or collision failure'
+
+    $failure = Invoke-FailedBootstrap ("ERROR: {`"code`":`"DeploymentActive`",`"message`":`"$($activeMessage -f '/subscriptions/00000000-0000-0000-0000-000000000000/providers/Microsoft.Resources/deployments/azure-files-dr-bootstrap-1')`"}")
+    Assert-True ($null -ne $failure -and $failure.Contains('az deployment sub cancel --name azure-files-dr-bootstrap-1') -and -not $failure.Contains('Container Apps couldn''t read')) "deploy.ps1 did not show how to cancel a running subscription deployment: $failure"
+
+    $privateImage = "acrtest.azurecr.io/azure-files-dr-azcopy@sha256:$digest"
+    $failure = Invoke-FailedBootstrap ("ERROR: {`"code`":`"InvalidParameterValueInContainerTemplate`",`"message`":`"$($imageMessage -f $privateImage, 'Get \"https://acrtest.azurecr.io/v2/\": dial tcp: lookup acrtest.azurecr.io on 168.63.129.16:53: no such host')`"}")
+    Assert-True ($null -ne $failure -and $failure.Contains('approved private endpoint for the registry') -and $failure.Contains('resolves acrtest.azurecr.io') -and -not $failure.Contains('mcr.microsoft.com')) "deploy.ps1 did not point a private registry failure at its endpoint and DNS: $failure"
+    Assert-True ($failure.Contains('With registryPrivateEndpointsEnabled = false') -and $failure.Contains('to acrtest.azurecr.io and its data endpoint, *.blob.core.windows.net')) "deploy.ps1 did not explain a registry failure through the registry's public endpoint: $failure"
+    Assert-True ($failure.Contains('a firewall must also allow login.microsoft.com')) "deploy.ps1 did not mention the registry sign-in endpoints: $failure"
+
+    $failure = Invoke-FailedBootstrap ("ERROR: {`"code`":`"InvalidParameterValueInContainerTemplate`",`"message`":`"$($imageMessage -f $privateImage, 'GET https:?scope=repository%3Aazure-files-dr-azcopy%3Apull: UNAUTHORIZED: authentication required')`"}")
+    Assert-True ($null -ne $failure -and $failure.Contains("The job identity isn't allowed to pull from acrtest.azurecr.io") -and $failure.Contains('AcrPull')) "deploy.ps1 did not explain a missing pull permission: $failure"
+
     $fakeAzRules = @(
         (New-Rule 'containerapp job list*' (ConvertTo-Json -InputObject $jobs -Depth 5 -Compress))
         (New-Rule 'containerapp job execution list*' '0')
