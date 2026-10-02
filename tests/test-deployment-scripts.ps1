@@ -255,6 +255,7 @@ try {
     $privateImage = "acrtest.azurecr.io/azure-files-dr-azcopy@sha256:$digest"
     $failure = Invoke-FailedBootstrap ("ERROR: {`"code`":`"InvalidParameterValueInContainerTemplate`",`"message`":`"$($imageMessage -f $privateImage, 'Get \"https://acrtest.azurecr.io/v2/\": dial tcp: lookup acrtest.azurecr.io on 168.63.129.16:53: no such host')`"}")
     Assert-True ($null -ne $failure -and $failure.Contains('approved private endpoint for the registry') -and $failure.Contains('resolves acrtest.azurecr.io') -and -not $failure.Contains('mcr.microsoft.com')) "deploy.ps1 did not point a private registry failure at its endpoint and DNS: $failure"
+    Assert-True ($failure.Contains('With registryPrivateEndpointsEnabled = false') -and $failure.Contains('to acrtest.azurecr.io and its data endpoint, *.blob.core.windows.net')) "deploy.ps1 did not explain a registry failure through the registry's public endpoint: $failure"
 
     $failure = Invoke-FailedBootstrap ("ERROR: {`"code`":`"InvalidParameterValueInContainerTemplate`",`"message`":`"$($imageMessage -f $privateImage, 'GET https:?scope=repository%3Aazure-files-dr-azcopy%3Apull: UNAUTHORIZED: authentication required')`"}")
     Assert-True ($null -ne $failure -and $failure.Contains("The job identity isn't allowed to pull from acrtest.azurecr.io") -and $failure.Contains('AcrPull')) "deploy.ps1 did not explain a missing pull permission: $failure"
