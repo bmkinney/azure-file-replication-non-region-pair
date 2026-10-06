@@ -285,6 +285,31 @@ try {
     Assert-True ($failure.Contains('az containerapp env list --resource-group rg-replication --query "[].{name:name, location:location, state:properties.provisioningState}" --output table') -and $failure.Contains('az containerapp job delete --resource-group rg-replication --name job-sync-pri --yes')) "deploy.ps1 did not show how to check the environment and delete the expired job: $failure"
     Assert-True ($failure.Contains("The job subnet couldn't reach mcr.microsoft.com")) "deploy.ps1 did not also explain the other job's image error: $failure"
 
+    # The existing-resource profile lets both jobs have the same name in different resource groups, so each expired job's
+    # resource group must come from the job resource that encloses the expiry, never from another job with that name.
+    $groupRoot = '/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups'
+    $sharedName = 'job-files-sync'
+    $expiredDetail = 'Operation expired.'
+    function New-JobFailure([string]$Group, [string]$Detail) {
+        "{`"code`":`"ResourceDeploymentFailure`",`"target`":`"$groupRoot/$Group/providers/Microsoft.App/jobs/$sharedName`",`"details`":[{`"code`":`"ContainerAppOperationError`",`"message`":`"$($provisionMessage -f $sharedName, $Detail)`"}]}"
+    }
+    function New-DeploymentError([string[]]$Details) {
+        "ERROR: {`"status`":`"Failed`",`"error`":{`"code`":`"DeploymentFailed`",`"details`":[$($Details -join ',')]}}"
+    }
+    $failure = Invoke-FailedBootstrap (New-DeploymentError @((New-JobFailure 'rg-primary' $imageError), (New-JobFailure 'rg-secondary' $expiredDetail)))
+    Assert-True ($null -ne $failure -and $failure.Contains("$sharedName in resource group rg-secondary") -and $failure.Contains("az containerapp job delete --resource-group rg-secondary --name $sharedName --yes")) "deploy.ps1 did not take the expired job's resource group from its own job resource: $failure"
+    Assert-True (-not $failure.Contains("--resource-group rg-primary --name $sharedName")) "deploy.ps1 suggested deleting a job with the same name that didn't expire: $failure"
+
+    $failure = Invoke-FailedBootstrap (New-DeploymentError @((New-JobFailure 'rg-primary' $expiredDetail), (New-JobFailure 'rg-secondary' $expiredDetail)))
+    Assert-True ($null -ne $failure -and $failure.Contains("az containerapp job delete --resource-group rg-primary --name $sharedName --yes") -and $failure.Contains("az containerapp job delete --resource-group rg-secondary --name $sharedName --yes")) "deploy.ps1 did not list both expired jobs with the same name: $failure"
+
+    $unenclosed = "{`"code`":`"ContainerAppOperationError`",`"message`":`"$($provisionMessage -f $sharedName, $expiredDetail)`"}"
+    $failure = Invoke-FailedBootstrap (New-DeploymentError @((New-JobFailure 'rg-primary' $imageError), $unenclosed))
+    Assert-True ($null -ne $failure -and $failure.Contains("az containerapp job delete --resource-group <resource-group> --name $sharedName --yes") -and -not $failure.Contains("--resource-group rg-primary --name $sharedName")) "deploy.ps1 guessed the resource group of an expired job that no job resource encloses: $failure"
+
+    $failure = Invoke-FailedBootstrap ("ERROR: " + ($provisionMessage -f $sharedName, $expiredDetail))
+    Assert-True ($null -ne $failure -and $failure.Contains("$sharedName, in a resource group that the error doesn't name") -and $failure.Contains("az containerapp job delete --resource-group <resource-group> --name $sharedName --yes")) "deploy.ps1 did not explain an expired job in an error that isn't JSON: $failure"
+
     $fakeAzRules = @(
         (New-Rule 'containerapp job list*' (ConvertTo-Json -InputObject $jobs -Depth 5 -Compress))
         (New-Rule 'containerapp job execution list*' '0')
