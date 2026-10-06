@@ -1,3 +1,5 @@
+#Requires -Version 7.2
+
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [string]$Location = 'southcentralus',
@@ -92,6 +94,88 @@ function Get-DeploymentActiveHint([string]$ErrorText) {
     return "`n`nDeployments from an earlier run are still running, so this run couldn't replace them. Stopping this script, or a Cloud Shell session that ends, doesn't stop deployments in Azure. For each one, the first command shows what it's still deploying, and the second cancels it:`n$($details -join "`n")`nWait for them to finish, or cancel them. A Container Apps environment that's still provisioning after 30 minutes usually can't reach the Container Apps outbound dependencies; see 'Outbound access through a firewall' in the README. Then rerun this script; the deployment reuses the resources it already created."
 }
 
+function ConvertFrom-AzError([string]$ErrorText) {
+    # Returns the JSON error that Azure CLI prints after "ERROR: ", or $null when the text has none that parses.
+    $flatText = [regex]::Replace($ErrorText, '\s*\r?\n[ \t]*(\|[ \t]?)?', ' ')
+    $start = $flatText.IndexOf('ERROR: {', [StringComparison]::Ordinal)
+    if ($start -lt 0) {
+        return $null
+    }
+    $start += 'ERROR: '.Length
+    $depth = 0
+    $inString = $false
+    for ($index = $start; $index -lt $flatText.Length; $index++) {
+        $character = $flatText[$index]
+        if ($inString) {
+            if ($character -eq '\') {
+                $index++
+            } elseif ($character -eq '"') {
+                $inString = $false
+            }
+        } elseif ($character -eq '"') {
+            $inString = $true
+        } elseif ($character -eq '{') {
+            $depth++
+        } elseif ($character -eq '}') {
+            $depth--
+            if ($depth -eq 0) {
+                try {
+                    return $flatText.Substring($start, $index - $start + 1) | ConvertFrom-Json
+                } catch {
+                    return $null
+                }
+            }
+        }
+    }
+    return $null
+}
+
+function Get-ExpiredJob($Node, [string]$JobId = '') {
+    # Lists each expired job in an Azure error, with the ID of the job resource whose failure encloses its message.
+    foreach ($item in @($Node)) {
+        if ($item -isnot [System.Management.Automation.PSCustomObject]) {
+            continue
+        }
+        $fields = @{}
+        foreach ($property in $item.PSObject.Properties) {
+            $fields[$property.Name] = $property.Value
+        }
+        $enclosingId = if ([string]$fields['target'] -match '(?i)/providers/Microsoft\.App/jobs/[^/]+$') { [string]$fields['target'] } else { $JobId }
+        $expired = [regex]::Match([string]$fields['message'], "(?i)container app '(?<job>[^']+)'\. Error details: Operation expired")
+        if ($expired.Success) {
+            [pscustomobject]@{ Job = $expired.Groups['job'].Value; JobId = $enclosingId }
+        }
+        Get-ExpiredJob $fields['error'] $enclosingId
+        Get-ExpiredJob $fields['details'] $enclosingId
+    }
+}
+
+function Get-OperationExpiredHint([string]$ErrorText) {
+    # Container Apps reports a job that its environment couldn't create in time as an expired operation. Both regions'
+    # jobs can have the same name in different resource groups, so each expiry gets the resource group of the job
+    # resource that encloses it in the error, and a placeholder when none does.
+    $flatText = [regex]::Replace($ErrorText, '\s*\r?\n[ \t]*(\|[ \t]?)?', ' ') -replace '\\"', '"'
+    $names = @([regex]::Matches($flatText, "(?i)container app '(?<job>[^']+)'\. Error details: Operation expired") | ForEach-Object { $_.Groups['job'].Value })
+    if ($names.Count -eq 0) {
+        return ''
+    }
+    $expired = @(Get-ExpiredJob (ConvertFrom-AzError $ErrorText))
+    $listed = @($expired | ForEach-Object Job)
+    $expired += @($names | Where-Object { $_ -notin $listed } | ForEach-Object { [pscustomobject]@{ Job = $_; JobId = '' } })
+    $seen = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $details = foreach ($entry in $expired) {
+        $idMatch = [regex]::Match($entry.JobId, '(?i)/resourceGroups/(?<group>[^/]+)/providers/Microsoft\.App/jobs/(?<job>[^/]+)$')
+        $group = if ($idMatch.Success -and $idMatch.Groups['job'].Value -eq $entry.Job) { $idMatch.Groups['group'].Value } else { '' }
+        if (-not $seen.Add($(if ($group) { $entry.JobId } else { "?/$($entry.Job)" }))) {
+            continue
+        }
+        $groupArgument = if ($group) { $group } else { '<resource-group>' }
+        $heading = if ($group) { "  $($entry.Job) in resource group $group" } else { "  $($entry.Job), in a resource group that the error doesn't name; replace <resource-group> with it" }
+        "$heading`n    az containerapp env list --resource-group $groupArgument --query `"[].{name:name, location:location, state:properties.provisioningState}`" --output table`n    az containerapp job delete --resource-group $groupArgument --name $($entry.Job) --yes"
+    }
+    return "`n`nContainer Apps couldn't finish creating these jobs before the operation expired. Usually their Container Apps environment can't reach all of the Container Apps outbound dependencies, for example because a firewall allows only some of them, or the environment is unhealthy after an earlier failed or canceled run. Allow outbound HTTPS from both job subnets to every endpoint in 'Outbound access through a firewall' in the README; scripts/inventory.ps1 reports job subnets that route internet traffic through a firewall. For each job, the first command shows the state of the environments in its resource group, and the second deletes the job:`n$($details -join "`n")`nIf an environment is Failed, or a job expires again after the firewall change, delete the job, and then the environment with az containerapp env delete. Then rerun this script; the environments and jobs hold no data, and the deployment recreates them."
+}
+
 function Get-OutputValue($Deployment, [string]$Name) {
     # Deployments of earlier template versions lack newer outputs.
     $output = $Deployment.properties.outputs.PSObject.Properties[$Name]
@@ -118,7 +202,7 @@ function Invoke-AzCli {
     }
 
     if ($exitCode -ne 0) {
-        throw "az $($Arguments -join ' ') failed:`n$errorOutput`n$($output -join [Environment]::NewLine)$(Get-RoleAssignmentHint $errorOutput)$(Get-PolicyHint $errorOutput)$(Get-ContainerImageHint $errorOutput)$(Get-DeploymentActiveHint $errorOutput)"
+        throw "az $($Arguments -join ' ') failed:`n$errorOutput`n$($output -join [Environment]::NewLine)$(Get-RoleAssignmentHint $errorOutput)$(Get-PolicyHint $errorOutput)$(Get-ContainerImageHint $errorOutput)$(Get-DeploymentActiveHint $errorOutput)$(Get-OperationExpiredHint $errorOutput)"
     }
     return ($output -join [Environment]::NewLine)
 }

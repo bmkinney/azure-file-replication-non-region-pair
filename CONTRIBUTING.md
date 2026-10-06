@@ -11,7 +11,7 @@ Thank you for helping improve this project. It solves one problem, private Azure
 
 ## Development setup
 
-You need PowerShell 7, Azure CLI with Bicep (`az bicep upgrade`), Terraform 1.9 or later, and Git. The tests make no Azure calls, so you don't need an Azure subscription to run them. See [Prerequisites](README.md#prerequisites) for the tools that deployments need.
+You need PowerShell 7.2 or later, Azure CLI with Bicep (`az bicep upgrade`), Terraform 1.9 or later, and Git. The tests make no Azure calls, so you don't need an Azure subscription to run them. See [Prerequisites](README.md#prerequisites) for the tools that deployments need.
 
 ## Run the tests
 

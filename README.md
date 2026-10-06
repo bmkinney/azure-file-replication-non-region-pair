@@ -123,7 +123,7 @@ The environments also send the jobs' logs, which the freshness alert queries, to
 
 If the jobs use a registry's public endpoint, with the Bicep existing-resource profile's `registryPrivateEndpointsEnabled = false`, also allow the registry's [REST and data endpoints](https://learn.microsoft.com/azure/container-registry/container-registry-firewall-rules), and `azurecr.io`, which clients need for the registry's TLS certificate.
 
-Without them, job creation fails with `InvalidParameterValueInContainerTemplate` and an `EOF`, a timeout, or a TLS error for `mcr.microsoft.com`, or the Container Apps environment doesn't finish provisioning, and the deployment runs until it times out. See [Container Apps deployment problems](#container-apps-deployment-problems).
+Without them, job creation fails with `InvalidParameterValueInContainerTemplate` and an `EOF`, a timeout, or a TLS error for `mcr.microsoft.com`, or with `Operation expired`, or the Container Apps environment doesn't finish provisioning, and the deployment runs until it times out. See [Container Apps deployment problems](#container-apps-deployment-problems).
 
 These rules only allow outbound connections: nothing in your environment becomes reachable from the internet, and the storage accounts, and a registry that the jobs reach through private endpoints, keep public network access disabled. Removing the firewall route from the job subnets would also work, but it sends all of their internet traffic around the firewall; allowing these endpoints is the narrower change.
 
@@ -156,7 +156,7 @@ Tools:
 - For Terraform: Terraform 1.9 or later.
 - For the portal guide's PowerShell commands: the Az PowerShell modules.
 - The Azure CLI `containerapp` extension for the `az containerapp job` commands: `az extension add --name containerapp --upgrade`. Listing freshness alerts with `az monitor scheduled-query` also needs the `scheduled-query` extension.
-- PowerShell 7 (`pwsh`) for the scripts and tests. Direct Bicep and Terraform deployments need only Azure CLI and the deployment tool.
+- PowerShell 7.2 or later (`pwsh`) for the scripts and tests. The scripts stop with a version error in Windows PowerShell. Direct Bicep and Terraform deployments need only Azure CLI and the deployment tool.
 - Git to clone the repository. The AzCopy wrapper test also uses `sh` when it's available; Git for Windows includes it.
 
 Sign in to the target tenant and subscription, and confirm the target before you run any command that changes Azure resources:
@@ -605,7 +605,7 @@ Re-enabling a schedule can start the most recently missed run immediately, so th
 
 ## Scripts and tests
 
-The scripts use the subscription that `az account show` reports, and they need PowerShell 7 and a signed-in Azure CLI. Run them from the repository root.
+The scripts use the subscription that `az account show` reports, and they need PowerShell 7.2 or later and a signed-in Azure CLI. Run them from the repository root.
 
 | Script | Purpose | Changes Azure resources | Permissions |
 | --- | --- | --- | --- |
@@ -675,12 +675,12 @@ The tests are standalone PowerShell 7 scripts that make no Azure calls and chang
 | `tests/test-monitoring-template.ps1` | Compiles `monitoring.bicep`, and checks that both freshness rules use a query with the configured threshold and the post-deployment grace period. | Azure CLI with Bicep |
 | `tests/test-inventory.ps1` | Runs `inventory.ps1` against canned Azure CLI responses: a greenfield deployment, local-endpoint and hub-only layouts, subnet sizes, services set to `new`, resource group layouts, custom names, role assignment rights, and separately granted roles for reused identities. | Azure CLI with Bicep, to compile the parameter files |
 | `tests/test-audit.ps1` | Runs the audit against canned responses: service ratings, network readiness, read-only calls, and generated parameter files for reuse, creation, ambiguous choices, and resource group layouts. | Azure CLI with Bicep, to compile the generated files |
-| `tests/test-deployment-scripts.ps1` | Runs `deploy.ps1` and `switch-direction.ps1` against a fake Azure CLI: `-WhatIf` changes nothing and leaves no temporary files, Azure CLI errors are reported, refused role assignments are summarized by scope, the two stages open and close registry access, switches find jobs in one or two resource groups, and with separately granted roles, `deploy.ps1` stops before the build until the roles exist and `switch-direction.ps1` warns about missing ones. | Nothing beyond PowerShell 7 |
-| `tests/test-grant-access.ps1` | Runs `grant-access.ps1` against a fake Azure CLI: `-WhatIf` only reads, only missing assignments are created with the templates' names, deployment outputs that list other roles, scopes, or principals are refused, identities are shown as Azure reports them, ABAC registries get Container Registry Repository Reader, refused assignments fail the run, identities can be named by resource ID, and invalid input is rejected. | Nothing beyond PowerShell 7 |
+| `tests/test-deployment-scripts.ps1` | Runs `deploy.ps1` and `switch-direction.ps1` against a fake Azure CLI: `-WhatIf` changes nothing and leaves no temporary files, Azure CLI errors are reported, refused role assignments are summarized by scope, the two stages open and close registry access, switches find jobs in one or two resource groups, and with separately granted roles, `deploy.ps1` stops before the build until the roles exist and `switch-direction.ps1` warns about missing ones. It also checks that every script that users run requires PowerShell 7.2. | Nothing beyond PowerShell 7.2 |
+| `tests/test-grant-access.ps1` | Runs `grant-access.ps1` against a fake Azure CLI: `-WhatIf` only reads, only missing assignments are created with the templates' names, deployment outputs that list other roles, scopes, or principals are refused, identities are shown as Azure reports them, ABAC registries get Container Registry Repository Reader, refused assignments fail the run, identities can be named by resource ID, and invalid input is rejected. | Nothing beyond PowerShell 7.2 |
 | `tests/test-terraform.ps1` | Runs `terraform fmt -check`, `init -backend=false`, `validate`, and `terraform test` in `deploy/terraform`. The Terraform tests use mock providers, so they plan the configuration without Azure credentials and check its security settings, triggers, role assignments, alerts, outputs, and input validation. | Terraform; skipped without it |
-| `tests/test-terraform-scripts.ps1` | Runs `deploy/terraform/deploy.ps1`, and the Terraform modes of `switch-direction.ps1` and `grant-access.ps1`, against a fake Terraform CLI and Azure CLI. | Nothing beyond PowerShell 7 |
-| `tests/test-pipelines.ps1` | Checks the GitHub Actions workflows and Azure DevOps pipelines: deployments start only by hand, use an approval environment and workload identity federation, clean up generated files, and pin actions by commit SHA. | Nothing beyond PowerShell 7 |
-| `tests/test-docs.ps1` | Checks that every relative link and heading anchor in the Markdown files resolves, and that the repository has no internal or organization-specific references. | Nothing beyond PowerShell 7 |
+| `tests/test-terraform-scripts.ps1` | Runs `deploy/terraform/deploy.ps1`, and the Terraform modes of `switch-direction.ps1` and `grant-access.ps1`, against a fake Terraform CLI and Azure CLI. | Nothing beyond PowerShell 7.2 |
+| `tests/test-pipelines.ps1` | Checks the GitHub Actions workflows and Azure DevOps pipelines: deployments start only by hand, use an approval environment and workload identity federation, clean up generated files, and pin actions by commit SHA. | Nothing beyond PowerShell 7.2 |
+| `tests/test-docs.ps1` | Checks that every relative link and heading anchor in the Markdown files resolves, and that the repository has no internal or organization-specific references. | Nothing beyond PowerShell 7.2 |
 | `src/azcopy-job/test-run-sync.ps1` | Checks that `run-sync.sh` uses LF line endings and the required AzCopy options and markers. With `sh`, it runs the wrapper against a stub `azcopy` to check the success, dry-run, and failure markers, URL redaction, and setting validation. | `sh` for the behavior checks, which are skipped without it |
 
 Run one test, or all of them:
@@ -758,7 +758,7 @@ Check name resolution from inside a job with a [one-off command](#run-a-one-off-
 
 ### Container Apps deployment problems
 
-Container Apps reads a job's image from its registry, over the job subnet's network, when it creates or updates the job, so network problems in the job subnets can fail a deployment before any job runs. When a deployment fails with one of the image errors below, `scripts/deploy.ps1` and `deploy/terraform/deploy.ps1` explain its likely cause.
+Container Apps reads a job's image from its registry, over the job subnet's network, when it creates or updates the job, so network problems in the job subnets can fail a deployment before any job runs. When a deployment fails with one of the image errors or with an expired operation, `scripts/deploy.ps1` and `deploy/terraform/deploy.ps1` explain its likely cause.
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
@@ -766,6 +766,7 @@ Container Apps reads a job's image from its registry, over the job subnet's netw
 | The same error for `<registry>.azurecr.io`, with `no such host`, a timeout, or `client with IP ... is not allowed access` | The job VNet can't reach the registry. With registry private endpoints, the VNet has no approved registry endpoint, or resolves the registry's public address. With the Bicep existing-resource profile's `registryPrivateEndpointsEnabled = false`, which Basic and Standard registries need, the jobs use the registry's public endpoint, and a firewall or the registry's network rules block it. | With private endpoints, check that the job VNet has an approved registry endpoint, and that its DNS resolves the registry name, and its regional data endpoint, to that endpoint through the `privatelink.azurecr.io` records. With the public endpoint, allow outbound HTTPS from the job subnets to the registry's [REST and data endpoints](https://learn.microsoft.com/azure/container-registry/container-registry-firewall-rules) and to `azurecr.io`, which clients need for the registry's TLS certificate. If the registry restricts public network access, also allow the subnets' outbound IP addresses. In both modes, a firewall must also allow the [sign-in endpoints](#outbound-access-through-a-firewall), including `login.microsoft.com`, which private endpoints don't cover. |
 | The same error with `UNAUTHORIZED` or `authentication required` | The job identity lacks AcrPull, or Container Registry Repository Reader on a registry with ABAC repository permissions, or the assignment hasn't taken effect yet. | Grant the role, wait up to 10 minutes, and rerun the deployment. |
 | A deployment runs for 30 minutes or more while it creates a Container Apps environment | The environment's infrastructure can't download its components through the firewall. | Allow the outbound dependencies. Then cancel the deployment, check the environment with `az containerapp env show --name <environment> --resource-group <resource-group> --query properties.provisioningState`, delete it if it's `Failed`, and rerun. An environment holds no data; the deployment recreates it. |
+| `ContainerAppOperationError` with `Failed to provision revision for container app '<job>'. Error details: Operation expired.` | Container Apps couldn't finish creating the job in time. Usually the job's environment can't reach all of the outbound dependencies, for example because a firewall allows only some of them, or the environment is unhealthy after an earlier failed or canceled run. | Allow all of the [outbound dependencies](#outbound-access-through-a-firewall) from both job subnets. Then check the environments with `az containerapp env list --resource-group <resource-group> --query "[].{name:name, state:properties.provisioningState}" --output table`. If an environment is `Failed`, or the job expires again, delete the job with `az containerapp job delete`, then the environment, and rerun. With Terraform, delete the failed job before you rerun, because Terraform can't create a job that already exists outside its state. |
 
 ### Image build and registry problems
 
@@ -829,7 +830,7 @@ Container Apps reads a job's image from its registry, over the job subnet's netw
 | A test fails with `No test fixture for: <arguments>` | The script under test made an Azure CLI call that the test doesn't fake. | Add a rule for the new call, or remove the unexpected call. |
 | A template test fails with Bicep errors that the templates don't have | The Bicep CLI is out of date. | Run `az bicep upgrade`. |
 | `Behavior checks were skipped because sh is not available.` | `test-run-sync.ps1` needs `sh` for its behavior checks. | Install Git for Windows, or run the test on Linux or macOS. |
-| A script or test fails in Windows PowerShell 5.1 | They need PowerShell 7. | Run them with `pwsh`. |
+| `The script '<name>.ps1' cannot be run because it contained a "#requires" statement for Windows PowerShell 7.2`, or a test fails in Windows PowerShell 5.1 | The scripts and tests need PowerShell 7.2 or later. In Windows PowerShell, a script would stop at its first Azure CLI error, before it explains the error. | Install [PowerShell 7](https://learn.microsoft.com/powershell/scripting/install/installing-powershell), and run them with `pwsh`. |
 
 ## Use this repository in your organization
 
