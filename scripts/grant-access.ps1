@@ -1,3 +1,5 @@
+#Requires -Version 7.2
+
 [CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'Deployment')]
 param(
     # A subscription deployment of either template whose jobRoleAssignments output lists the assignments, such as the

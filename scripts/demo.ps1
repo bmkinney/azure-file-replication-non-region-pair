@@ -1,3 +1,5 @@
+#Requires -Version 7.2
+
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [Parameter(Position = 0)]

@@ -1,3 +1,5 @@
+#Requires -Version 7.2
+
 [CmdletBinding()]
 param(
     # One or more resource groups to audit. Comma-separated values are accepted. Omit to audit every resource group in the current subscription.

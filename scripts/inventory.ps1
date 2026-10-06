@@ -1,3 +1,5 @@
+#Requires -Version 7.2
+
 [CmdletBinding()]
 param(
     [string]$ParametersFile = (Join-Path $PSScriptRoot '..\deploy\bicep\main.bicepparam'),
@@ -168,7 +170,7 @@ function Add-OutboundFinding([string]$Item, $Subnet) {
     } elseif ($defaultRoute.NextHop -eq 'None') {
         Add-Prerequisite -Area 'Network' -Item $Item -Status 'Action required' -Detail "Internet traffic from the subnet is dropped by route $($defaultRoute.Route) in route table $($defaultRoute.Table), so Container Apps can't reach its outbound dependencies: $outboundDependencies. Send that traffic through a firewall that allows them, or remove the route. See 'Outbound access through a firewall' in the README."
     } elseif ($defaultRoute.Destination) {
-        Add-Prerequisite -Area 'Network' -Item $Item -Status 'Warning' -Detail "Internet traffic from the subnet $($defaultRoute.Destination), through route $($defaultRoute.Route) in route table $($defaultRoute.Table). Confirm that the firewall allows outbound HTTPS, without TLS inspection, to the Container Apps outbound dependencies: $outboundDependencies. Otherwise job creation fails with InvalidParameterValueInContainerTemplate, or the Container Apps environment doesn't finish provisioning. Private endpoints can't replace these. See 'Outbound access through a firewall' in the README."
+        Add-Prerequisite -Area 'Network' -Item $Item -Status 'Warning' -Detail "Internet traffic from the subnet $($defaultRoute.Destination), through route $($defaultRoute.Route) in route table $($defaultRoute.Table). Confirm that the firewall allows outbound HTTPS, without TLS inspection, to the Container Apps outbound dependencies: $outboundDependencies. Otherwise job creation fails with InvalidParameterValueInContainerTemplate or Operation expired, or the Container Apps environment doesn't finish provisioning. Private endpoints can't replace these. See 'Outbound access through a firewall' in the README."
     } else {
         Add-Prerequisite -Area 'Network' -Item $Item -Status 'Ready' -Detail "Route table $($defaultRoute.Table) doesn't send internet traffic through a firewall. $unlistedRoutes"
     }

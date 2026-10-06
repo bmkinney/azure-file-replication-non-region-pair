@@ -1,3 +1,5 @@
+#Requires -Version 7.2
+
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [string]$Location = 'southcentralus',
@@ -92,6 +94,23 @@ function Get-DeploymentActiveHint([string]$ErrorText) {
     return "`n`nDeployments from an earlier run are still running, so this run couldn't replace them. Stopping this script, or a Cloud Shell session that ends, doesn't stop deployments in Azure. For each one, the first command shows what it's still deploying, and the second cancels it:`n$($details -join "`n")`nWait for them to finish, or cancel them. A Container Apps environment that's still provisioning after 30 minutes usually can't reach the Container Apps outbound dependencies; see 'Outbound access through a firewall' in the README. Then rerun this script; the deployment reuses the resources it already created."
 }
 
+function Get-OperationExpiredHint([string]$ErrorText) {
+    # Container Apps reports a job that its environment couldn't create in time as an expired operation.
+    $flatText = [regex]::Replace($ErrorText, '\s*\r?\n[ \t]*(\|[ \t]?)?', ' ') -replace '\\"', '"'
+    $jobs = @([regex]::Matches($flatText, "(?i)container app '(?<job>[^']+)'\. Error details: Operation expired") | ForEach-Object { $_.Groups['job'].Value } | Select-Object -Unique)
+    if ($jobs.Count -eq 0) {
+        return ''
+    }
+    $details = foreach ($job in $jobs) {
+        $group = [regex]::Match($flatText, "(?i)/resourceGroups/(?<group>[^/`"]+)/providers/Microsoft\.App/jobs/$([regex]::Escape($job))(?![\w-])").Groups['group'].Value
+        if (-not $group) {
+            $group = '<resource-group>'
+        }
+        "  $job in resource group $group`n    az containerapp env list --resource-group $group --query `"[].{name:name, location:location, state:properties.provisioningState}`" --output table`n    az containerapp job delete --resource-group $group --name $job --yes"
+    }
+    return "`n`nContainer Apps couldn't finish creating these jobs before the operation expired. Usually their Container Apps environment can't reach all of the Container Apps outbound dependencies, for example because a firewall allows only some of them, or the environment is unhealthy after an earlier failed or canceled run. Allow outbound HTTPS from both job subnets to every endpoint in 'Outbound access through a firewall' in the README; scripts/inventory.ps1 reports job subnets that route internet traffic through a firewall. For each job, the first command shows the state of the environments in its resource group, and the second deletes the job:`n$($details -join "`n")`nIf an environment is Failed, or a job expires again after the firewall change, delete the job, and then the environment with az containerapp env delete. Then rerun this script; the environments and jobs hold no data, and the deployment recreates them."
+}
+
 function Get-OutputValue($Deployment, [string]$Name) {
     # Deployments of earlier template versions lack newer outputs.
     $output = $Deployment.properties.outputs.PSObject.Properties[$Name]
@@ -118,7 +137,7 @@ function Invoke-AzCli {
     }
 
     if ($exitCode -ne 0) {
-        throw "az $($Arguments -join ' ') failed:`n$errorOutput`n$($output -join [Environment]::NewLine)$(Get-RoleAssignmentHint $errorOutput)$(Get-PolicyHint $errorOutput)$(Get-ContainerImageHint $errorOutput)$(Get-DeploymentActiveHint $errorOutput)"
+        throw "az $($Arguments -join ' ') failed:`n$errorOutput`n$($output -join [Environment]::NewLine)$(Get-RoleAssignmentHint $errorOutput)$(Get-PolicyHint $errorOutput)$(Get-ContainerImageHint $errorOutput)$(Get-DeploymentActiveHint $errorOutput)$(Get-OperationExpiredHint $errorOutput)"
     }
     return ($output -join [Environment]::NewLine)
 }

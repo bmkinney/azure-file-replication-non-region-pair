@@ -1,3 +1,5 @@
+#Requires -Version 7.2
+
 [CmdletBinding(SupportsShouldProcess)]
 param(
     [string]$TerraformDirectory = $PSScriptRoot,
@@ -56,6 +58,23 @@ function Get-ContainerImageHint([string]$ErrorText) {
     return $hint
 }
 
+function Get-OperationExpiredHint([string]$ErrorText) {
+    # Container Apps reports a job that its environment couldn't create in time as an expired operation.
+    $flatText = [regex]::Replace($ErrorText, '\s*\r?\n[ \t]*([|\u2502][ \t]?)?', ' ') -replace '\\"', '"'
+    $jobs = @([regex]::Matches($flatText, "(?i)container app '(?<job>[^']+)'\. Error details: Operation expired") | ForEach-Object { $_.Groups['job'].Value } | Select-Object -Unique)
+    if ($jobs.Count -eq 0) {
+        return ''
+    }
+    $details = foreach ($job in $jobs) {
+        $group = [regex]::Match($flatText, "Resource Group Name: `"(?<group>[^`"]+)`"[\s|\u2502]+Job Name: `"$([regex]::Escape($job))`"").Groups['group'].Value
+        if (-not $group) {
+            $group = '<resource-group>'
+        }
+        "  $job in resource group $group`n    az containerapp env list --resource-group $group --query `"[].{name:name, location:location, state:properties.provisioningState}`" --output table`n    az containerapp job delete --resource-group $group --name $job --yes"
+    }
+    return "`n`nContainer Apps couldn't finish creating these jobs before the operation expired. Usually their Container Apps environment can't reach all of the Container Apps outbound dependencies, for example because a firewall allows only some of them, or the environment is unhealthy after an earlier failed or canceled run. Allow outbound HTTPS from both job subnets to every endpoint in 'Outbound access through a firewall' in the README. Terraform can't create a job that already exists outside its state, so delete each failed job before you rerun this script. For each job, the first command shows the state of the environments in its resource group, and the second deletes the job:`n$($details -join "`n")`nIf an environment is Failed, delete it as well with az containerapp env delete. Then rerun this script; the environments and jobs hold no data, and Terraform recreates them."
+}
+
 function Invoke-AzCli {
     param([Parameter(Mandatory)][string[]]$Arguments)
 
@@ -91,7 +110,7 @@ function Invoke-Terraform {
 
     if ($exitCode -ne 0) {
         $flatError = [regex]::Replace($errorOutput, '\s*\r?\n[ \t]*(\|[ \t]?)?', ' ').Trim()
-        throw "terraform $($Arguments -join ' ') failed:`n$flatError`n$($output -join [Environment]::NewLine)$(Get-RoleAssignmentHint $flatError)$(Get-ContainerImageHint $errorOutput)"
+        throw "terraform $($Arguments -join ' ') failed:`n$flatError`n$($output -join [Environment]::NewLine)$(Get-RoleAssignmentHint $flatError)$(Get-ContainerImageHint $errorOutput)$(Get-OperationExpiredHint $errorOutput)"
     }
     return ($output -join [Environment]::NewLine)
 }

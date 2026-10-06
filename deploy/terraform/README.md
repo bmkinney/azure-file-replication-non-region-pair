@@ -19,7 +19,7 @@ Architecture and operations background:
 
 - Terraform >= 1.9
 - Azure CLI with the Container Apps extension
-- PowerShell 7
+- PowerShell 7.2 or later (`pwsh`)
 - `az login` to the target subscription
 - Registered resource providers:
 

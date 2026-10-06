@@ -150,6 +150,19 @@ try {
         Assert-True ($failure.Contains('*.login.microsoftonline.com, login.microsoft.com, and *.login.microsoft.com')) "deploy.ps1 did not list the sign-in endpoints, including login.microsoft.com: $failure"
         Assert-True (@($azCalls | Where-Object { $_ -like 'acr *' }).Count -eq 0) 'deploy.ps1 built the image after the bootstrap apply failed'
 
+        $expiredFailure = @(
+            "$bar Error: creating Container App Job (Subscription: `"00000000-0000-0000-0000-000000000000`""
+            "$bar Resource Group Name: `"rg-terraform`""
+            "$bar Job Name: `"job-sync-primary`"): polling after CreateOrUpdate: polling failed: the Azure API returned the following error:"
+            $bar
+            "$bar Status: `"ContainerAppOperationError`""
+            "$bar Message: `"Failed to provision revision for container app 'job-sync-primary'. Error details: Operation expired.`""
+        ) -join "`n"
+        $failure = $null
+        try { Invoke-Isolated { $global:TerraformScriptApplyError = $expiredFailure; & $deployScript -TerraformDirectory $terraformDirectory -Confirm:$false 6> $null } } catch { $failure = $_.Exception.Message }
+        Assert-True ($failure -like "*Container Apps couldn't finish creating these jobs before the operation expired*job-sync-primary in resource group rg-terraform*") "deploy.ps1 did not explain an expired job operation: $failure"
+        Assert-True ($failure.Contains('az containerapp job delete --resource-group rg-terraform --name job-sync-primary --yes') -and $failure.Contains("Terraform can't create a job that already exists outside its state")) "deploy.ps1 did not say to delete the expired job before rerunning: $failure"
+
         Invoke-Isolated { & $switchScript -ActiveRegion secondary -WritesFenced -TerraformDirectory $terraformDirectory -WhatIf 6> $null }
         Assert-True (@($azCalls | Where-Object { $_ -like 'containerapp job execution list*' }).Count -eq 2) 'switch-direction.ps1 did not check running executions'
         Assert-True (@($terraformCalls | Where-Object { $_ -like '* apply *' }).Count -eq 0) 'switch-direction.ps1 -WhatIf applied'

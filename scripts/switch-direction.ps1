@@ -1,3 +1,5 @@
+#Requires -Version 7.2
+
 [CmdletBinding(SupportsShouldProcess, DefaultParameterSetName = 'Bicep')]
 param(
     [Parameter(Mandatory)]

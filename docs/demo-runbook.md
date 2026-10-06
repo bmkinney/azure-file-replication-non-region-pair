@@ -7,7 +7,7 @@ This runbook walks through a live demonstration of the Azure Files replication s
 - A live replication.
 - Alerts for stale replication and for a failed run.
 
-Each step uses `scripts/demo.ps1`. It runs in Azure Cloud Shell (PowerShell) or in any PowerShell 7 session with the Azure CLI, and it works with both deployment profiles.
+Each step uses `scripts/demo.ps1`. It runs in Azure Cloud Shell (PowerShell) or in any PowerShell 7.2 or later session with the Azure CLI, and it works with both deployment profiles.
 
 Run the demo against a nonproduction deployment. The stale-replication scenario stops scheduled replication for about an hour, so the replica falls behind the source during that time.
 
@@ -48,7 +48,7 @@ Run the demo against a nonproduction deployment. The stale-replication scenario 
 ## Prerequisites
 
 - A deployment of either profile that runs the AzCopy image, not the placeholder image, and has an active direction (`activeRegion=primary` or `secondary`). `status` shows both.
-- Azure Cloud Shell in PowerShell mode, or PowerShell 7 and the Azure CLI on a workstation, with this repository cloned. Run the commands from the repository root.
+- Azure Cloud Shell in PowerShell mode, or PowerShell 7.2 or later and the Azure CLI on a workstation, with this repository cloned. Run the commands from the repository root.
 - The subscription that contains the deployment, selected with `az account set --subscription <subscription-id>`.
 - For the existing-resource profile, or a greenfield deployment with a custom `resourceGroupName`, the replication resource group in an environment variable, so you don't have to pass `-ResourceGroupName` to every command:
 
