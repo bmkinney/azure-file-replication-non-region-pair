@@ -310,6 +310,24 @@ try {
     $failure = Invoke-FailedBootstrap ("ERROR: " + ($provisionMessage -f $sharedName, $expiredDetail))
     Assert-True ($null -ne $failure -and $failure.Contains("$sharedName, in a resource group that the error doesn't name") -and $failure.Contains("az containerapp job delete --resource-group <resource-group> --name $sharedName --yes")) "deploy.ps1 did not explain an expired job in an error that isn't JSON: $failure"
 
+    # A rerun before an environment that was deleted to recreate it is gone fails validation of the nested deployment
+    # that deploys the environment. The report doesn't name the environment, so the hint names that deployment.
+    $notReadyTemplate = "{`"code`":`"InvalidTemplateDeployment`",`"message`":`"The template deployment 'replication-sec-compute' is not valid according to the validation procedure. The following resource provider(s) - 'Microsoft.App/managedEnvironments (2025-01-01)' reported preflight validation errors. See inner errors for details.`",`"details`":[{`"code`":`"ValidationForResourceFailed`",`"message`":`"Validation failed for a resource.`",`"details`":[{`"code`":`"ManagedEnvironmentNotReadyForAppCreation`",`"message`":`"Container App Environment is not ready for container app creation as it is in state '<state>'.`"}]}]}"
+    $deletingList = "az containerapp env list --query `"[?properties.provisioningState=='ScheduledForDelete'].id`" --output tsv"
+    $failure = Invoke-FailedBootstrap (New-DeploymentError @($notReadyTemplate.Replace('<state>', 'ScheduledForDelete'), (New-JobFailure 'rg-primary' $expiredDetail)))
+    Assert-True ($null -ne $failure -and $failure.Contains('A Container Apps environment that this deployment uses is still being deleted') -and $failure.Contains('  deployment replication-sec-compute: environment state ScheduledForDelete') -and $failure.Contains($deletingList)) "deploy.ps1 did not explain an environment that's still being deleted: $failure"
+    Assert-True (-not $failure.Contains("isn't ready for jobs")) "deploy.ps1 described an environment that's being deleted as one that's still provisioning: $failure"
+    Assert-True ($failure.Contains("az containerapp job delete --resource-group rg-primary --name $sharedName --yes") -and $failure.Contains('Wait until az containerapp env list no longer shows the environment')) "deploy.ps1 did not say to wait until a deleted environment is gone before rerunning: $failure"
+
+    $failure = Invoke-FailedBootstrap (New-DeploymentError @($notReadyTemplate.Replace('<state>', 'InfrastructureSetupInProgress')))
+    Assert-True ($null -ne $failure -and $failure.Contains("isn't ready for jobs") -and $failure.Contains('  deployment replication-sec-compute: environment state InfrastructureSetupInProgress') -and -not $failure.Contains('A Container Apps environment that this deployment uses is still being deleted')) "deploy.ps1 did not explain an environment that's still provisioning: $failure"
+
+    $failure = Invoke-FailedBootstrap "ERROR: Container App Environment is not ready for container app creation as it is in state 'ScheduledForDelete'."
+    Assert-True ($null -ne $failure -and $failure.Contains('  environment state ScheduledForDelete') -and $failure.Contains($deletingList)) "deploy.ps1 did not explain an environment that's still being deleted in an error that isn't JSON: $failure"
+
+    $failure = Invoke-FailedBootstrap $partialEgress
+    Assert-True ($null -ne $failure -and -not $failure.Contains('A Container Apps environment that this deployment uses is still being deleted') -and -not $failure.Contains("isn't ready for jobs")) "deploy.ps1 explained an environment state that the error doesn't report: $failure"
+
     $fakeAzRules = @(
         (New-Rule 'containerapp job list*' (ConvertTo-Json -InputObject $jobs -Depth 5 -Compress))
         (New-Rule 'containerapp job execution list*' '0')

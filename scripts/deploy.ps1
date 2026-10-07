@@ -173,7 +173,60 @@ function Get-OperationExpiredHint([string]$ErrorText) {
         $heading = if ($group) { "  $($entry.Job) in resource group $group" } else { "  $($entry.Job), in a resource group that the error doesn't name; replace <resource-group> with it" }
         "$heading`n    az containerapp env list --resource-group $groupArgument --query `"[].{name:name, location:location, state:properties.provisioningState}`" --output table`n    az containerapp job delete --resource-group $groupArgument --name $($entry.Job) --yes"
     }
-    return "`n`nContainer Apps couldn't finish creating these jobs before the operation expired. Usually their Container Apps environment can't reach all of the Container Apps outbound dependencies, for example because a firewall allows only some of them, or the environment is unhealthy after an earlier failed or canceled run. Allow outbound HTTPS from both job subnets to every endpoint in 'Outbound access through a firewall' in the README; scripts/inventory.ps1 reports job subnets that route internet traffic through a firewall. For each job, the first command shows the state of the environments in its resource group, and the second deletes the job:`n$($details -join "`n")`nIf an environment is Failed, or a job expires again after the firewall change, delete the job, and then the environment with az containerapp env delete. Then rerun this script; the environments and jobs hold no data, and the deployment recreates them."
+    return "`n`nContainer Apps couldn't finish creating these jobs before the operation expired. Usually their Container Apps environment can't reach all of the Container Apps outbound dependencies, for example because a firewall allows only some of them, or the environment is unhealthy after an earlier failed or canceled run. Allow outbound HTTPS from both job subnets to every endpoint in 'Outbound access through a firewall' in the README; scripts/inventory.ps1 reports job subnets that route internet traffic through a firewall. For each job, the first command shows the state of the environments in its resource group, and the second deletes the job:`n$($details -join "`n")`nIf an environment is Failed, or a job expires again after the firewall change, delete the job, and then the environment with az containerapp env delete. Wait until az containerapp env list no longer shows the environment, because a rerun fails while it's still being deleted. Then rerun this script; the environments and jobs hold no data, and the deployment recreates them."
+}
+
+function Get-NotReadyEnvironment($Node, [string]$Deployment = '') {
+    # Lists each report in an Azure error that a Container Apps environment isn't ready for jobs, with the nested
+    # deployment that encloses the report. The report doesn't name the environment, so the deployment identifies it.
+    foreach ($item in @($Node)) {
+        if ($item -isnot [System.Management.Automation.PSCustomObject]) {
+            continue
+        }
+        $fields = @{}
+        foreach ($property in $item.PSObject.Properties) {
+            $fields[$property.Name] = $property.Value
+        }
+        $enclosing = $Deployment
+        $targetMatch = [regex]::Match([string]$fields['target'], '(?i)/providers/Microsoft\.Resources/deployments/(?<name>[^/]+)$')
+        $messageMatch = [regex]::Match([string]$fields['message'], "^The template deployment '(?<name>[^']+)'")
+        if ($targetMatch.Success) {
+            $enclosing = $targetMatch.Groups['name'].Value
+        } elseif ($messageMatch.Success) {
+            $enclosing = $messageMatch.Groups['name'].Value
+        }
+        $notReady = [regex]::Match([string]$fields['message'], "(?i)not ready for container app creation as it is in state '(?<state>[^']+)'")
+        if ($notReady.Success) {
+            [pscustomobject]@{ Deployment = $enclosing; State = $notReady.Groups['state'].Value }
+        }
+        Get-NotReadyEnvironment $fields['error'] $enclosing
+        Get-NotReadyEnvironment $fields['details'] $enclosing
+    }
+}
+
+function Get-EnvironmentNotReadyHint([string]$ErrorText) {
+    # Container Apps refuses new jobs in an environment that's being deleted or hasn't finished provisioning, for
+    # example when the deployment reruns before an environment that was deleted to recreate it is gone.
+    $flatText = [regex]::Replace($ErrorText, '\s*\r?\n[ \t]*(\|[ \t]?)?', ' ')
+    $states = @([regex]::Matches($flatText, "(?i)not ready for container app creation as it is in state '(?<state>[^']+)'") | ForEach-Object { $_.Groups['state'].Value })
+    if ($states.Count -eq 0) {
+        return ''
+    }
+    $reports = @(Get-NotReadyEnvironment (ConvertFrom-AzError $ErrorText))
+    if ($reports.Count -eq 0) {
+        $reports = @($states | ForEach-Object { [pscustomobject]@{ Deployment = ''; State = $_ } })
+    }
+    $describe = { if ($_.Deployment) { "  deployment $($_.Deployment): environment state $($_.State)" } else { "  environment state $($_.State)" } }
+    $hint = ''
+    $deleting = @($reports | Where-Object State -EQ 'ScheduledForDelete' | Sort-Object Deployment -Unique)
+    if ($deleting.Count -gt 0) {
+        $hint += "`n`nA Container Apps environment that this deployment uses is still being deleted, so Azure can't create a job in it:`n$(@($deleting | ForEach-Object $describe) -join "`n")`nA rerun fails this way until the deletion finishes. This command lists the environments that are still being deleted:`n    az containerapp env list --query `"[?properties.provisioningState=='ScheduledForDelete'].id`" --output tsv`nRerun this script after it no longer lists the environment; the deployment recreates it. If an environment stays in this state, its deletion is stuck; see 'Container Apps deployment problems' in the README."
+    }
+    $pending = @($reports | Where-Object State -NE 'ScheduledForDelete' | Sort-Object Deployment, State -Unique)
+    if ($pending.Count -gt 0) {
+        $hint += "`n`nA Container Apps environment that this deployment uses isn't ready for jobs:`n$(@($pending | ForEach-Object $describe) -join "`n")`nWait until its provisioning state is Succeeded, and rerun this script. If it's Failed, delete its jobs and then the environment with az containerapp env delete, wait until az containerapp env list no longer shows the environment, and rerun."
+    }
+    return $hint
 }
 
 function Get-OutputValue($Deployment, [string]$Name) {
@@ -202,7 +255,7 @@ function Invoke-AzCli {
     }
 
     if ($exitCode -ne 0) {
-        throw "az $($Arguments -join ' ') failed:`n$errorOutput`n$($output -join [Environment]::NewLine)$(Get-RoleAssignmentHint $errorOutput)$(Get-PolicyHint $errorOutput)$(Get-ContainerImageHint $errorOutput)$(Get-DeploymentActiveHint $errorOutput)$(Get-OperationExpiredHint $errorOutput)"
+        throw "az $($Arguments -join ' ') failed:`n$errorOutput`n$($output -join [Environment]::NewLine)$(Get-RoleAssignmentHint $errorOutput)$(Get-PolicyHint $errorOutput)$(Get-ContainerImageHint $errorOutput)$(Get-DeploymentActiveHint $errorOutput)$(Get-OperationExpiredHint $errorOutput)$(Get-EnvironmentNotReadyHint $errorOutput)"
     }
     return ($output -join [Environment]::NewLine)
 }

@@ -162,6 +162,19 @@ try {
         try { Invoke-Isolated { $global:TerraformScriptApplyError = $expiredFailure; & $deployScript -TerraformDirectory $terraformDirectory -Confirm:$false 6> $null } } catch { $failure = $_.Exception.Message }
         Assert-True ($failure -like "*Container Apps couldn't finish creating these jobs before the operation expired*job-sync-primary in resource group rg-terraform*") "deploy.ps1 did not explain an expired job operation: $failure"
         Assert-True ($failure.Contains('az containerapp job delete --resource-group rg-terraform --name job-sync-primary --yes') -and $failure.Contains("Terraform can't create a job that already exists outside its state")) "deploy.ps1 did not say to delete the expired job before rerunning: $failure"
+        Assert-True ($failure.Contains('wait until az containerapp env list no longer shows it')) "deploy.ps1 did not say to wait until a deleted environment is gone before rerunning: $failure"
+
+        # The message wraps across framed lines, which the hint must join before it matches.
+        $notReadyFailure = @(
+            "$bar Error: creating Container App Job (Subscription: `"00000000-0000-0000-0000-000000000000`""
+            "$bar Resource Group Name: `"rg-terraform`""
+            "$bar Job Name: `"job-sync-secondary`"): performing CreateOrUpdate: unexpected status 400 (400 Bad Request) with error:"
+            "$bar ManagedEnvironmentNotReadyForAppCreation: Container App Environment is not ready for container app"
+            "$bar creation as it is in state 'ScheduledForDelete'."
+        ) -join "`n"
+        $failure = $null
+        try { Invoke-Isolated { $global:TerraformScriptApplyError = $notReadyFailure; & $deployScript -TerraformDirectory $terraformDirectory -Confirm:$false 6> $null } } catch { $failure = $_.Exception.Message }
+        Assert-True ($null -ne $failure -and $failure.Contains('A Container Apps environment is still being deleted') -and $failure.Contains("az containerapp env list --query `"[?properties.provisioningState=='ScheduledForDelete'].id`" --output tsv") -and -not $failure.Contains("isn't ready for jobs")) "deploy.ps1 did not explain an environment that's still being deleted: $failure"
 
         Invoke-Isolated { & $switchScript -ActiveRegion secondary -WritesFenced -TerraformDirectory $terraformDirectory -WhatIf 6> $null }
         Assert-True (@($azCalls | Where-Object { $_ -like 'containerapp job execution list*' }).Count -eq 2) 'switch-direction.ps1 did not check running executions'

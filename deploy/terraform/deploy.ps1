@@ -72,7 +72,28 @@ function Get-OperationExpiredHint([string]$ErrorText) {
         }
         "  $job in resource group $group`n    az containerapp env list --resource-group $group --query `"[].{name:name, location:location, state:properties.provisioningState}`" --output table`n    az containerapp job delete --resource-group $group --name $job --yes"
     }
-    return "`n`nContainer Apps couldn't finish creating these jobs before the operation expired. Usually their Container Apps environment can't reach all of the Container Apps outbound dependencies, for example because a firewall allows only some of them, or the environment is unhealthy after an earlier failed or canceled run. Allow outbound HTTPS from both job subnets to every endpoint in 'Outbound access through a firewall' in the README. Terraform can't create a job that already exists outside its state, so delete each failed job before you rerun this script. For each job, the first command shows the state of the environments in its resource group, and the second deletes the job:`n$($details -join "`n")`nIf an environment is Failed, delete it as well with az containerapp env delete. Then rerun this script; the environments and jobs hold no data, and Terraform recreates them."
+    return "`n`nContainer Apps couldn't finish creating these jobs before the operation expired. Usually their Container Apps environment can't reach all of the Container Apps outbound dependencies, for example because a firewall allows only some of them, or the environment is unhealthy after an earlier failed or canceled run. Allow outbound HTTPS from both job subnets to every endpoint in 'Outbound access through a firewall' in the README. Terraform can't create a job that already exists outside its state, so delete each failed job before you rerun this script. For each job, the first command shows the state of the environments in its resource group, and the second deletes the job:`n$($details -join "`n")`nIf an environment is Failed, delete it as well with az containerapp env delete, and wait until az containerapp env list no longer shows it, because a rerun fails while it's still being deleted. Then rerun this script; the environments and jobs hold no data, and Terraform recreates them."
+}
+
+function Get-EnvironmentNotReadyHint([string]$ErrorText) {
+    # Container Apps refuses new jobs in an environment that's being deleted or hasn't finished provisioning, for
+    # example when this script reruns before an environment that was deleted to recreate it is gone. Terraform
+    # starts each diagnostic line with a box-drawing character, and PowerShell can reflow redirected error text so
+    # that one lands inside a line, so all of them are removed with the line breaks.
+    $flatText = [regex]::Replace($ErrorText, '\s*\r?\n[ \t]*(?:\|[ \t]*)?', ' ') -replace '\s*\u2502\s*', ' '
+    $states = @([regex]::Matches($flatText, "(?i)not ready for container app creation as it is in state '(?<state>[^']+)'") | ForEach-Object { $_.Groups['state'].Value } | Sort-Object -Unique)
+    if ($states.Count -eq 0) {
+        return ''
+    }
+    $hint = ''
+    if ($states -contains 'ScheduledForDelete') {
+        $hint += "`n`nA Container Apps environment is still being deleted, so Azure can't create a job in it, and a rerun fails this way until the deletion finishes. This command lists the environments that are still being deleted:`n    az containerapp env list --query `"[?properties.provisioningState=='ScheduledForDelete'].id`" --output tsv`nRerun this script after it no longer lists the environment; Terraform then recreates it. If an environment stays in this state, its deletion is stuck; see 'Container Apps deployment problems' in the README."
+    }
+    $pending = @($states | Where-Object { $_ -ne 'ScheduledForDelete' })
+    if ($pending.Count -gt 0) {
+        $hint += "`n`nA Container Apps environment isn't ready for jobs (state $($pending -join ', ')). Wait until its provisioning state is Succeeded, and rerun this script. If it's Failed, delete it with az containerapp env delete, wait until az containerapp env list no longer shows it, and rerun; Terraform then recreates it."
+    }
+    return $hint
 }
 
 function Invoke-AzCli {
@@ -110,7 +131,7 @@ function Invoke-Terraform {
 
     if ($exitCode -ne 0) {
         $flatError = [regex]::Replace($errorOutput, '\s*\r?\n[ \t]*(\|[ \t]?)?', ' ').Trim()
-        throw "terraform $($Arguments -join ' ') failed:`n$flatError`n$($output -join [Environment]::NewLine)$(Get-RoleAssignmentHint $flatError)$(Get-ContainerImageHint $errorOutput)$(Get-OperationExpiredHint $errorOutput)"
+        throw "terraform $($Arguments -join ' ') failed:`n$flatError`n$($output -join [Environment]::NewLine)$(Get-RoleAssignmentHint $flatError)$(Get-ContainerImageHint $errorOutput)$(Get-OperationExpiredHint $errorOutput)$(Get-EnvironmentNotReadyHint $errorOutput)"
     }
     return ($output -join [Environment]::NewLine)
 }
